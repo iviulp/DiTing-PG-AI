@@ -572,7 +572,7 @@ export const App: React.FC = () => {
             <Group orientation="vertical">
               {/* Top Half: Monaco SQL Editor */}
               <Panel defaultSize={45} minSize={0}>
-                <div className="h-full p-2">
+                <div className="h-full w-full bg-[#111318]">
                   <SqlEditor
                     value={sqlText}
                     onChange={(val) => setSqlText(val)}
@@ -581,11 +581,11 @@ export const App: React.FC = () => {
                 </div>
               </Panel>
 
-              <Separator className="h-1.5 bg-slate-800 hover:bg-blue-500 transition-colors cursor-row-resize flex items-center justify-center" />
+              <Separator className="h-1 bg-[#1c202a] hover:bg-blue-500 transition-colors cursor-row-resize flex items-center justify-center" />
 
               {/* Bottom Half: Data Grid Results */}
               <Panel defaultSize={55} minSize={0}>
-                <div className="h-full p-2">
+                <div className="h-full w-full bg-[#0d0f14]">
                   <DataGrid
                     result={queryResult}
                     resultTabs={resultTabs}

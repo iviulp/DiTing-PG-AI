@@ -231,10 +231,10 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
   if (isExecuting) {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-white dark:bg-[#1a1c20] text-slate-400">
-        <div className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm animate-pulse">
-          <Zap className="w-4 h-4 text-amber-500 fill-current" />
-          <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+      <div className="h-full w-full flex items-center justify-center bg-[#0d1015] text-slate-400">
+        <div className="flex items-center gap-2 px-4 py-2 bg-slate-900/90 rounded-2xl border border-slate-800 shadow-xl animate-pulse">
+          <Zap className="w-4 h-4 text-amber-400 fill-current" />
+          <span className="text-xs font-semibold text-slate-200">
             Executing query on remote server...
           </span>
         </div>
@@ -244,8 +244,8 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
   if (!result) {
     return (
-      <div className="h-full w-full flex flex-col items-center justify-center bg-white dark:bg-[#1a1c20] text-slate-400 text-xs">
-        <Table className="w-8 h-8 text-slate-300 dark:text-slate-700 mb-2" />
+      <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-slate-500 text-xs select-none">
+        <Table className="w-8 h-8 text-slate-700 mb-2" />
         <span>No dataset executed yet. Run a SQL query to inspect results.</span>
       </div>
     );
@@ -258,10 +258,10 @@ export const DataGrid: React.FC<DataGridProps> = ({
   const originalLength = result.rows.length;
 
   return (
-    <div className="h-full w-full flex flex-col bg-white dark:bg-[#181a1d] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden text-xs shadow-sm relative">
+    <div className="h-full w-full flex flex-col bg-[#0d0f14] text-xs relative overflow-hidden">
       {/* 1. Multi-Result Tabs Bar (多 SQL 执行选项卡指示器) */}
       {resultTabs && resultTabs.length > 1 && (
-        <div className="bg-[#14161b] border-b border-slate-800 flex items-center gap-1 px-2 pt-1.5 overflow-x-auto select-none font-sans">
+        <div className="bg-[#090b0e] border-b border-[#1c202a] flex items-center gap-1 px-3 pt-1.5 overflow-x-auto select-none font-sans">
           {resultTabs.map((tab, idx) => {
             const isActive = tab.id === activeTabId;
             const hasError = !!tab.error;
@@ -295,11 +295,11 @@ export const DataGrid: React.FC<DataGridProps> = ({
       )}
 
       {/* Table Action / Metadata Toolbar */}
-      <div className="px-4 py-2 bg-slate-100 dark:bg-[#202227] border-b border-slate-200 dark:border-slate-800 flex justify-between items-center text-slate-600 dark:text-slate-300">
+      <div className="px-4 py-2 bg-[#12141a] border-b border-[#1c202a] flex justify-between items-center text-slate-300">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
-            <Zap className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
-            <span className="font-bold text-slate-900 dark:text-slate-100">
+            <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
+            <span className="font-bold text-slate-100">
               {result.rows.length + addedRows.length}
             </span>
             <span className="text-slate-400">
@@ -309,7 +309,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
           <button
             onClick={handleAddRow}
-            className="px-2 py-0.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors"
+            className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors"
             title="增加新行 (Add Row)"
           >
             <Plus className="w-3.5 h-3.5" /> 增加行
@@ -323,20 +323,22 @@ export const DataGrid: React.FC<DataGridProps> = ({
                 setIsDrawerOpen(true);
               }
             }}
-            className="px-2.5 py-0.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:hover:bg-amber-600 text-white rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors"
-            title="在右侧打开当前选中行的详情大字段页"
+            className="px-2.5 py-1 bg-[#1a1d26] hover:bg-[#222733] disabled:opacity-40 text-slate-300 rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors border border-[#272d3b]"
+            title="查看并编辑当前选中行的完整列信息"
           >
-            <Eye className="w-3.5 h-3.5" /> 查看行详情
+            <Eye className="w-3.5 h-3.5 text-amber-400" /> 查看行详情
           </button>
 
-          {/* Unsaved Changes Buffer Indicator */}
+          {/* 实时未保存修改统计面板 (Dirty Changes Bar) */}
           {totalUnsaved > 0 && (
-            <div className="flex items-center gap-2 bg-amber-500/20 text-amber-400 px-2.5 py-0.5 rounded-lg border border-amber-500/40 text-[11px] font-bold">
-              <span>⚠️ {totalUnsaved} 项待提交变更 ({deleteCount > 0 ? `删${deleteCount} ` : ''}{addCount > 0 ? `加${addCount} ` : ''}{editCount > 0 ? `改${editCount}` : ''})</span>
+            <div className="flex items-center gap-2 px-2.5 py-0.5 bg-amber-500/15 border border-amber-500/30 rounded text-amber-300 text-xs animate-pulse">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>
+                {totalUnsaved} 处修改未保存 ({editCount} 改动, {deleteCount} 删除, {addCount} 新增)
+              </span>
               <button
                 onClick={handleCommit}
-                className="px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-[10px] flex items-center gap-1 shadow font-bold"
-                title="手动确认并提交所有变更 (⌘S)"
+                className="ml-1 px-2 py-0.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded flex items-center gap-1 shadow"
               >
                 <Save className="w-3 h-3" /> 确认提交 (⌘S)
               </button>
@@ -352,18 +354,18 @@ export const DataGrid: React.FC<DataGridProps> = ({
         </div>
 
         {result.is_read_only && (
-          <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-950/80 text-amber-600 dark:text-amber-300 rounded-md text-[10px] font-bold border border-amber-200 dark:border-amber-800 flex items-center gap-1">
+          <span className="px-2 py-0.5 bg-amber-950/80 text-amber-300 rounded text-[10px] font-bold border border-amber-800 flex items-center gap-1">
             <ShieldCheck className="w-3 h-3" /> READ-ONLY MODE
           </span>
         )}
       </div>
 
       {/* Main Table Grid */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto bg-[#0d0f14]">
         <table className="w-full text-left border-collapse font-sans">
           <thead>
-            <tr className="bg-slate-100 dark:bg-[#202227] text-slate-700 dark:text-slate-300 border-b border-slate-200 dark:border-slate-800 sticky top-0 shadow-sm z-10">
-              <th className="px-3 py-2 font-mono text-[11px] border-r border-slate-200 dark:border-slate-800 w-12 text-center text-slate-400 font-normal select-none">
+            <tr className="bg-[#141720] text-slate-200 border-b border-[#1c202a] sticky top-0 shadow z-10 font-mono">
+              <th className="px-3 py-2 font-mono text-[11px] border-r border-[#1c202a] w-12 text-center text-slate-500 font-normal select-none">
                 #
               </th>
               {result.columns.map((col, idx) => {
@@ -448,17 +450,17 @@ export const DataGrid: React.FC<DataGridProps> = ({
                       setIsDrawerOpen(true);
                     }
                   }}
-                  className={`transition-colors ${
+                  className={`transition-colors border-b border-[#181c25] ${
                     isMarkedDeleted
                       ? 'bg-red-950/40 text-red-400 line-through decoration-red-500'
                       : isSelected
-                      ? 'bg-blue-900/30 dark:bg-blue-900/40 border-l-2 border-l-amber-500'
+                      ? 'bg-blue-600/25 border-l-2 border-l-amber-400 text-white'
                       : rIdx % 2 === 0
-                      ? 'bg-white dark:bg-[#181a1d]'
-                      : 'bg-slate-50/60 dark:bg-[#1e2025]'
-                  } hover:bg-blue-50/70 dark:hover:bg-blue-950/40 cursor-pointer`}
+                      ? 'bg-[#0d0f14]'
+                      : 'bg-[#101218]'
+                  } hover:bg-[#191d27] cursor-pointer`}
                 >
-                  <td className="px-3 py-2 border-r border-slate-200 dark:border-slate-800 text-center text-slate-400 text-[11px] font-mono select-none relative">
+                  <td className="px-3 py-2 border-r border-[#181c25] text-center text-slate-500 text-[11px] font-mono select-none relative">
                     {isMarkedDeleted ? (
                       <span className="text-red-500 font-bold" title="已标记删除">✕</span>
                     ) : (
@@ -477,14 +479,14 @@ export const DataGrid: React.FC<DataGridProps> = ({
                       <td
                         key={cIdx}
                         onDoubleClick={() => handleCellDoubleClick(rIdx, colName)}
-                        className={`px-3 py-1.5 border-r border-slate-200 dark:border-slate-800 whitespace-nowrap max-w-xs truncate h-9 box-border ${
+                        className={`px-3 py-1.5 border-r border-[#181c25] whitespace-nowrap max-w-xs truncate h-9 box-border ${
                           isMarkedDeleted
                             ? 'opacity-60 line-through'
                             : isModified
                             ? 'bg-amber-500/20 text-amber-300 font-bold'
                             : isNull
-                            ? 'text-slate-300 dark:text-slate-600 italic font-sans text-[11px]'
-                            : 'text-slate-800 dark:text-slate-200'
+                            ? 'text-slate-600 italic font-sans text-[11px]'
+                            : 'text-slate-200'
                         }`}
                         title={displayVal}
                       >

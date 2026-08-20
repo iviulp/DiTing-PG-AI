@@ -116,7 +116,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ value, onChange, onExecute
 
   return (
     <div
-      className="h-full w-full border border-slate-700 rounded-lg overflow-hidden bg-[#1e1e1e] relative"
+      className="h-full w-full bg-[#111318] relative overflow-hidden flex flex-col select-none"
       onContextMenu={() => {
         // 如果右键点击了 Monaco 组件区域，弹窗辅助菜单
         const selection = editorInstance?.getSelection();
