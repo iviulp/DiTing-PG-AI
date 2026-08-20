@@ -1,0 +1,246 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #e2e8f0;
+  background-color: #090b0e;
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+
+/* Custom Scrollbar for macOS Feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.5);
+}
+
+/* macOS 窗口无缝拖拽标题栏 */
+.app-drag-region {
+  -webkit-app-region: drag;
+}
+
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* 1:1 还原 Gemini 经典蓝色/天青色/湛蓝弥散流光极光 */
+@keyframes gemini-aurora {
+  0% {
+    transform: translate(-50%, -50%) rotate(0deg) scale(1);
+    filter: blur(80px);
+    opacity: 0.65;
+  }
+  33% {
+    transform: translate(-50%, -50%) rotate(120deg) scale(1.35);
+    filter: blur(120px);
+    opacity: 0.85;
+  }
+  66% {
+    transform: translate(-50%, -50%) rotate(240deg) scale(1.15);
+    filter: blur(100px);
+    opacity: 0.75;
+  }
+  100% {
+    transform: translate(-50%, -50%) rotate(360deg) scale(1);
+    filter: blur(80px);
+    opacity: 0.65;
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 35px rgba(59, 130, 246, 0.4), 0 0 70px rgba(16, 185, 129, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 70px rgba(59, 130, 246, 0.7), 0 0 120px rgba(245, 158, 11, 0.5);
+  }
+}
+
+.animate-gemini-aurora {
+  animation: gemini-aurora 16s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Liquid Glass 水玻璃水纹波纹与物理流体扩散动画 */
+@keyframes liquid-ripple {
+  0% {
+    transform: scale(0.3);
+    opacity: 0.9;
+    border-radius: 40%;
+    filter: blur(4px);
+  }
+  50% {
+    transform: scale(1.8);
+    opacity: 0.6;
+    border-radius: 48%;
+    filter: blur(12px);
+  }
+  100% {
+    transform: scale(3.5);
+    opacity: 0;
+    border-radius: 50%;
+    filter: blur(25px);
+  }
+}
+
+@keyframes liquid-glass-pulse {
+  0% {
+    backdrop-filter: blur(12px) saturate(140%);
+    box-shadow: inset 0 0 15px rgba(255, 255, 255, 0.1), 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  }
+  50% {
+    backdrop-filter: blur(24px) saturate(200%);
+    box-shadow: inset 0 0 35px rgba(59, 130, 246, 0.3), 0 12px 48px 0 rgba(59, 130, 246, 0.35);
+  }
+  100% {
+    backdrop-filter: blur(12px) saturate(140%);
+    box-shadow: inset 0 0 15px rgba(255, 255, 255, 0.1), 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  }
+}
+
+.animate-liquid-ripple {
+  animation: liquid-ripple 1.2s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+
+/* DEV 绿色微风水波波纹 (Emerald Breeze) */
+@keyframes water-breeze-dev {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4), inset 0 0 0 0 rgba(16, 185, 129, 0.2);
+    transform: scale(1);
+  }
+  30% {
+    box-shadow: 0 0 25px 8px rgba(16, 185, 129, 0.35), inset 0 0 15px 3px rgba(16, 185, 129, 0.3);
+    transform: scale(1.015);
+  }
+  60% {
+    box-shadow: 0 0 45px 15px rgba(5, 150, 105, 0.2), inset 0 0 25px 6px rgba(16, 185, 129, 0.2);
+    transform: scale(1.008);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0), inset 0 0 0 0 rgba(16, 185, 129, 0);
+    transform: scale(1);
+  }
+}
+
+/* TEST 黄色微风水波波纹 (Amber Breeze) */
+@keyframes water-breeze-test {
+  0% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4), inset 0 0 0 0 rgba(245, 158, 11, 0.2);
+    transform: scale(1);
+  }
+  30% {
+    box-shadow: 0 0 25px 8px rgba(245, 158, 11, 0.35), inset 0 0 15px 3px rgba(245, 158, 11, 0.3);
+    transform: scale(1.015);
+  }
+  60% {
+    box-shadow: 0 0 45px 15px rgba(217, 119, 6, 0.2), inset 0 0 25px 6px rgba(245, 158, 11, 0.2);
+    transform: scale(1.008);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0), inset 0 0 0 0 rgba(245, 158, 11, 0);
+    transform: scale(1);
+  }
+}
+
+/* PROD 红色微风水波波纹 (Rose Red Warning Breeze) */
+@keyframes water-breeze-prod {
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5), inset 0 0 0 0 rgba(239, 68, 68, 0.3);
+    transform: scale(1);
+  }
+  30% {
+    box-shadow: 0 0 30px 10px rgba(239, 68, 68, 0.45), inset 0 0 20px 4px rgba(239, 68, 68, 0.4);
+    transform: scale(1.02);
+  }
+  60% {
+    box-shadow: 0 0 50px 18px rgba(220, 38, 38, 0.25), inset 0 0 30px 8px rgba(239, 68, 68, 0.25);
+    transform: scale(1.01);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0), inset 0 0 0 0 rgba(239, 68, 68, 0);
+    transform: scale(1);
+  }
+}
+
+.animate-breeze-dev { animation: water-breeze-dev 0.8s cubic-bezier(0.25, 1, 0.5, 1) ease-out; }
+.animate-breeze-test { animation: water-breeze-test 0.8s cubic-bezier(0.25, 1, 0.5, 1) ease-out; }
+.animate-breeze-prod { animation: water-breeze-prod 0.8s cubic-bezier(0.25, 1, 0.5, 1) ease-out; }
+
+/* DEV 绿色卡片水玻璃底色 */
+.liquid-glass-card-dev {
+  background: rgba(16, 185, 129, 0.05);
+  backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 0 0 rgba(16, 185, 129, 0.2);
+  transition: all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.liquid-glass-card-dev:hover {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.5);
+  box-shadow: 0 12px 35px 0 rgba(16, 185, 129, 0.25), inset 0 1px 1px 0 rgba(16, 185, 129, 0.3);
+  transform: translateY(-2px) scale(1.01);
+}
+
+/* TEST 黄色卡片水玻璃底色 */
+.liquid-glass-card-test {
+  background: rgba(245, 158, 11, 0.05);
+  backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 0 0 rgba(245, 158, 11, 0.2);
+  transition: all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.liquid-glass-card-test:hover {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.5);
+  box-shadow: 0 12px 35px 0 rgba(245, 158, 11, 0.25), inset 0 1px 1px 0 rgba(245, 158, 11, 0.3);
+  transform: translateY(-2px) scale(1.01);
+}
+
+/* PROD 红色卡片水玻璃底色 */
+.liquid-glass-card-prod {
+  background: rgba(239, 68, 68, 0.08);
+  backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4), inset 0 1px 0 0 rgba(239, 68, 68, 0.25);
+  transition: all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.liquid-glass-card-prod:hover {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.6);
+  box-shadow: 0 12px 35px 0 rgba(239, 68, 68, 0.35), inset 0 1px 1px 0 rgba(239, 68, 68, 0.4);
+  transform: translateY(-2px) scale(1.01);
+}
+
+
+.liquid-glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 0 0 rgba(255, 255, 255, 0.1);
+  transition: all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.liquid-glass-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(59, 130, 246, 0.4);
+  box-shadow: 0 12px 35px 0 rgba(59, 130, 246, 0.2), inset 0 1px 1px 0 rgba(255, 255, 255, 0.2);
+  transform: translateY(-2px) scale(1.01);
+}
+
+
+
+
