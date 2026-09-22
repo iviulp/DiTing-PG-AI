@@ -1,5 +1,5 @@
-/// SQL 抽象执行服务与连接池管理器
-/// 支持 PostgreSQL, MySQL, SQLite 的动态连接调度与异步 Execute/Query 操作
+//! SQL 抽象执行服务与连接池管理器
+//! 支持 PostgreSQL, MySQL, SQLite 的动态连接调度与异步 Execute/Query 操作
 
 use crate::error::AppError;
 use crate::models::{ColumnMetadata, ConnectionConfig, DatabaseType, DbValue, QueryResult};
@@ -208,7 +208,7 @@ impl DbService {
     pub fn translate_psql_command(cmd: &str, _current_db: &str) -> String {
         let trimmed = cmd.trim().trim_end_matches(';');
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        let main_cmd = parts.get(0).copied().unwrap_or("");
+        let main_cmd = parts.first().copied().unwrap_or("");
         let arg = parts.get(1).copied().unwrap_or("");
 
         match main_cmd {

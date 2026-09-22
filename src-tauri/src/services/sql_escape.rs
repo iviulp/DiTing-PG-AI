@@ -1,13 +1,13 @@
-/// WP4 (步骤1): 统一 SQL 转义工具 — 消除动态插值注入面
-///
-/// 语义契约 (与 src/utils/sqlEscape.ts 逐条对齐):
-/// - 假设 PostgreSQL standard_conforming_strings=on (PG 9.1+ 默认): 反斜杠在字符串字面量中
-///   无转义语义, 原样保留; 唯一需要的字面量转义是 `'` → `''`。
-/// - 控制字符 (0x00-0x1F, 除 \t 放行; 0x7F DEL 也拒绝) 一律返回 Err — 拒绝而非清洗,
-///   防止 NUL 截断类攻击 (PG 协议本身不允许字符串含 NUL)。
-/// - 标识符: `"` → `""` 并包裹双引号; UTF-8 字节长度 >63 (PG NAME_MAX) 返回 Err。
-/// - escape_like_pattern: 先转义 LIKE 元字符 (\ % _), 调用顺序契约 —
-///   必须【先】escape_like_pattern 再【后】escape_sql_literal 包裹进字面量。
+//! WP4 (步骤1): 统一 SQL 转义工具 — 消除动态插值注入面
+//!
+//! 语义契约 (与 src/utils/sqlEscape.ts 逐条对齐):
+//! - 假设 PostgreSQL standard_conforming_strings=on (PG 9.1+ 默认): 反斜杠在字符串字面量中
+//!   无转义语义, 原样保留; 唯一需要的字面量转义是 `'` → `''`。
+//! - 控制字符 (0x00-0x1F, 除 \t 放行; 0x7F DEL 也拒绝) 一律返回 Err — 拒绝而非清洗,
+//!   防止 NUL 截断类攻击 (PG 协议本身不允许字符串含 NUL)。
+//! - 标识符: `"` → `""` 并包裹双引号; UTF-8 字节长度 >63 (PG NAME_MAX) 返回 Err。
+//! - escape_like_pattern: 先转义 LIKE 元字符 (\ % _), 调用顺序契约 —
+//!   必须【先】escape_like_pattern 再【后】escape_sql_literal 包裹进字面量。
 
 use std::fmt;
 
@@ -16,6 +16,7 @@ pub enum SqlEscapeError {
     /// 含控制字符 (0x00-0x1F 除 \t, 及 0x7F)
     ControlCharacter(char),
     /// 标识符 UTF-8 字节长度超过 PostgreSQL 上限 63
+    #[allow(dead_code)] // 错误契约变体 (Display + 测试覆盖); prod 经 escape 函数触发
     IdentifierTooLong(usize),
 }
 
@@ -51,6 +52,7 @@ pub fn escape_sql_literal(s: &str) -> Result<String, SqlEscapeError> {
 
 /// 标识符安全引用: `"` → `""` 并包裹为 `"..."`。
 /// UTF-8 字节长度 >63 拒绝 (PG 会静默截断导致指向错误对象)。
+#[allow(dead_code)] // 与前端 sqlEscape.ts quoteIdentifier 语义对齐 (parity + 测试覆盖)
 pub fn quote_identifier(s: &str) -> Result<String, SqlEscapeError> {
     check_control_chars(s)?;
     let len = s.len();
@@ -61,6 +63,7 @@ pub fn quote_identifier(s: &str) -> Result<String, SqlEscapeError> {
 }
 
 /// 标识符清洗 (不包裹): `"` → `""`, 供调用方已有外层引号模板使用。
+#[allow(dead_code)] // 与前端 sqlEscape.ts sanitizeIdentifier 语义对齐 (parity + 测试覆盖)
 pub fn sanitize_identifier(s: &str) -> Result<String, SqlEscapeError> {
     check_control_chars(s)?;
     let len = s.len();
@@ -72,6 +75,7 @@ pub fn sanitize_identifier(s: &str) -> Result<String, SqlEscapeError> {
 
 /// LIKE 模式转义: `\` → `\\`, `%` → `\%`, `_` → `\_`
 /// (需配合 `LIKE '...' ESCAPE '\'` 或 PG 默认反斜杠 escape 语义)
+#[allow(dead_code)] // 与前端 sqlEscape.ts escapeLikePattern 语义对齐 (parity + 测试覆盖)
 pub fn escape_like_pattern(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

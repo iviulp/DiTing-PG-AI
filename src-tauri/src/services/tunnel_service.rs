@@ -1,10 +1,11 @@
-/// WP3: SSH 隧道服务 — russh 0.63 纯 Rust 实现
-/// - direct 单跳: 本机 → SSH 主机 → 目标 DB (channel_open_direct_tcpip)
-/// - bastion_jump 双跳: 本机 → 堡垒机 →(direct-tcpip 隧道流)→ 目标内网机 → DB
-/// - 认证链: password / privatekey(passphrase) / keyboard-interactive + TOTP(OTP 关键词注入, 手填 otp_code 优先)
-/// - 主机密钥: TOFU 首次信任 + 指纹持久化 (~/.aidb/known_hosts), 变更硬失败
-/// - 本地端口: bind("127.0.0.1:0") 动态分配 + accept loop + copy_bidirectional
-/// 计划: docs/plans/WP3-ssh-tunnel.md (会议2/3/4/6/7/8 决议)
+//! WP3: SSH 隧道服务 — russh 0.63 纯 Rust 实现
+//! - direct 单跳: 本机 → SSH 主机 → 目标 DB (channel_open_direct_tcpip)
+//! - bastion_jump 双跳: 本机 → 堡垒机 →(direct-tcpip 隧道流)→ 目标内网机 → DB
+//! - 认证链: password / privatekey(passphrase) / keyboard-interactive + TOTP(OTP 关键词注入, 手填 otp_code 优先)
+//! - 主机密钥: TOFU 首次信任 + 指纹持久化 (~/.aidb/known_hosts), 变更硬失败
+//! - 本地端口: bind("127.0.0.1:0") 动态分配 + accept loop + copy_bidirectional
+//!
+//! 计划: docs/plans/WP3-ssh-tunnel.md (会议2/3/4/6/7/8 决议)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +39,7 @@ pub enum TunnelState {
 
 impl TunnelState {
     /// 状态机转移校验 (会议2: 非法转移拒绝)
+    #[allow(dead_code)] // 状态机转移校验: T 单测覆盖全部合法/非法转移
     pub fn can_transition_to(&self, next: &TunnelState) -> bool {
         use TunnelState::*;
         match (self, next) {
@@ -54,10 +56,12 @@ impl TunnelState {
         }
     }
 
+    #[allow(dead_code)] // 状态机访问器: 测试断言转移合法性; 前端经 get_tunnel_state 消费
     pub fn is_failed(&self) -> bool {
         matches!(self, TunnelState::Failed { .. })
     }
 
+    #[allow(dead_code)] // 状态机访问器 (测试 + 诊断)
     pub fn is_active(&self) -> bool {
         matches!(
             self,
@@ -286,20 +290,27 @@ pub struct SshSession {
     pub handle: Arc<client::Handle<TunnelHandler>>,
 }
 
+/// WP3: SSH 连接目标端点 (WP7: 打包为结构体, open_ssh_session 参数降至 clippy 阈值内)
+struct SshTarget<'a> {
+    user: &'a str,
+    host: &'a str,
+    port: u16,
+    auth_type: SshAuthType,
+    password: Option<&'a str>,
+    key_path: Option<&'a str>,
+}
+
 /// 建立到单跳的认证会话。认证链 (会议4):
 /// 1. privatekey 模式: publickey(passphrase 解密)
 /// 2. password 模式: 有 otp_secret/otp_code → keyboard-interactive 优先, 失败降级 password(+OTP 拼接)
 /// 3. 无 OTP: 直接 password
 async fn open_ssh_session(
     cfg: &SshTunnelConfig,
-    user: &str,
-    host: &str,
-    port: u16,
-    auth_type: SshAuthType,
-    password: Option<&str>,
-    key_path: Option<&str>,
+    target: SshTarget<'_>,
     host_store: Arc<HostKeyStore>,
 ) -> Result<SshSession, AppError> {
+    // 解构目标端点; 下方逻辑沿用原变量名 (零改动)
+    let SshTarget { user, host, port, auth_type, password, key_path } = target;
     let host_port = format!("{host}:{port}");
     let host_key_error: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     let handler = TunnelHandler {
@@ -308,10 +319,12 @@ async fn open_ssh_session(
         host_key_error: host_key_error.clone(),
     };
 
-    let mut ssh_config = client::Config::default();
-    ssh_config.keepalive_interval = Some(std::time::Duration::from_secs(15));
-    ssh_config.keepalive_max = 3;
-    ssh_config.inactivity_timeout = Some(std::time::Duration::from_secs(30));
+    let ssh_config = client::Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(15)),
+        keepalive_max: 3,
+        inactivity_timeout: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    };
 
     let connect_timeout = std::time::Duration::from_secs(15);
     let mut handle = tokio::time::timeout(
@@ -467,6 +480,7 @@ async fn try_keyboard_interactive(
 
 /// 隧道句柄: 本地监听端口 + 关闭通道
 pub struct TunnelHandle {
+    #[allow(dead_code)] // 句柄自描述端口: 诊断日志与未来多跳扩展; 当前经 TunnelManager 返回
     pub local_port: u16,
     shutdown: tokio::sync::oneshot::Sender<()>,
     /// 转发任务退出通知 (sshd 断开时由转发协程发出)
@@ -527,12 +541,14 @@ pub async fn open_direct_tunnel(
     validate(&cfg, &db_host)?;
     let session = open_ssh_session(
         &cfg,
-        &cfg.ssh_user,
-        &cfg.ssh_host,
-        cfg.ssh_port,
-        cfg.auth_type,
-        cfg.ssh_password.as_deref(),
-        cfg.ssh_private_key_path.as_deref(),
+        SshTarget {
+            user: &cfg.ssh_user,
+            host: &cfg.ssh_host,
+            port: cfg.ssh_port,
+            auth_type: cfg.auth_type,
+            password: cfg.ssh_password.as_deref(),
+            key_path: cfg.ssh_private_key_path.as_deref(),
+        },
         host_store,
     )
     .await?;
@@ -790,6 +806,7 @@ impl TunnelManager {
     }
 
     /// 当前活动隧道数 (测试泄漏检测用)
+    #[allow(dead_code)] // 诊断/测试: 断言隧道关闭后无泄漏句柄
     pub async fn active_count(&self) -> usize {
         let lock = self.tunnels.read().await;
         lock.iter().filter(|(_, t)| t.state.is_active() || t.state == TunnelState::Forwarding).count()
@@ -866,12 +883,14 @@ pub async fn open_bastion_tunnel(
     // ---- hop1: 堡垒机 ----
     let hop1 = open_ssh_session(
         &cfg,
-        &cfg.ssh_user,
-        &cfg.ssh_host,
-        cfg.ssh_port,
-        cfg.auth_type,
-        cfg.ssh_password.as_deref(),
-        cfg.ssh_private_key_path.as_deref(),
+        SshTarget {
+            user: &cfg.ssh_user,
+            host: &cfg.ssh_host,
+            port: cfg.ssh_port,
+            auth_type: cfg.auth_type,
+            password: cfg.ssh_password.as_deref(),
+            key_path: cfg.ssh_private_key_path.as_deref(),
+        },
         host_store.clone(),
     )
     .await
@@ -967,10 +986,12 @@ where
         host_port: host_port.clone(),
         host_key_error: host_key_error.clone(),
     };
-    let mut ssh_config = client::Config::default();
-    ssh_config.keepalive_interval = Some(std::time::Duration::from_secs(15));
-    ssh_config.keepalive_max = 3;
-    ssh_config.inactivity_timeout = Some(std::time::Duration::from_secs(30));
+    let ssh_config = client::Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(15)),
+        keepalive_max: 3,
+        inactivity_timeout: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    };
 
     let mut handle = tokio::time::timeout(
         std::time::Duration::from_secs(15),

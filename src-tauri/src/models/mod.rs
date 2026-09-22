@@ -1,5 +1,5 @@
-/// 通用强类型数据模型与 JSON 映射层
-/// 解决大整数、Decimal、JSONB、Timestamp 与 Hex 二进制格式在 Rust 与 JS 之间的序列化问题
+//! 通用强类型数据模型与 JSON 映射层
+//! 解决大整数、Decimal、JSONB、Timestamp 与 Hex 二进制格式在 Rust 与 JS 之间的序列化问题
 
 use serde::{Deserialize, Serialize};
 

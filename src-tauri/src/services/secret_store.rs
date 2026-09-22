@@ -1,7 +1,7 @@
-/// WP2: 本地秘密加密存储 (方案 B+)
-/// Argon2id(固定密码 + 每文件随机 salt) 派生 256 位密钥 + AES-256-GCM 加密
-/// 威胁模型: 防配置文件被拷走/误备份/被其他进程读取; 不防本机 root 与内存 dump。
-/// format_version 字段为后续升级 keyring (WP 计划备选) 预留迁移位。
+//! WP2: 本地秘密加密存储 (方案 B+)
+//! Argon2id(固定密码 + 每文件随机 salt) 派生 256 位密钥 + AES-256-GCM 加密
+//! 威胁模型: 防配置文件被拷走/误备份/被其他进程读取; 不防本机 root 与内存 dump。
+//! format_version 字段为后续升级 keyring (WP 计划备选) 预留迁移位。
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};

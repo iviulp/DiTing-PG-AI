@@ -1,8 +1,8 @@
-/// WP6-S1: 加密原语层 (纯函数, 无 IO)
-/// - derive_key_argon2id: 主密码 → KEK/DEK (19MiB / t2 / p1, 输出 32B)
-/// - hkdf_subkey: 从 KEK 按用途 info 派生子密钥 (用途隔离)
-/// - aes_gcm_encrypt/decrypt: 每次随机 12B nonce, AES-256-GCM
-/// - base64 工具
+//! WP6-S1: 加密原语层 (纯函数, 无 IO)
+//! - derive_key_argon2id: 主密码 → KEK/DEK (19MiB / t2 / p1, 输出 32B)
+//! - hkdf_subkey: 从 KEK 按用途 info 派生子密钥 (用途隔离)
+//! - aes_gcm_encrypt/decrypt: 每次随机 12B nonce, AES-256-GCM
+//! - base64 工具
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;

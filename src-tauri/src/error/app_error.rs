@@ -1,7 +1,7 @@
-/// AIDB Desk 统一错误处理模块
-///
-/// 封装后端 Rust Engine 所有的强类型错误分支，包含数据库驱动异常、
-/// 安全 Vault 加解密失败、Rig AI Agent 工具调用故障及网络/IO 错误。
+//! AIDB Desk 统一错误处理模块
+//!
+//! 封装后端 Rust Engine 所有的强类型错误分支，包含数据库驱动异常、
+//! 安全 Vault 加解密失败、Rig AI Agent 工具调用故障及网络/IO 错误。
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

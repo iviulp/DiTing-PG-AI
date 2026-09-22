@@ -1,8 +1,9 @@
-/// WP5: 类型映射与 SSL 模式纯函数层
-/// - TypePlan: 列类型 → 读取策略 (A2-A4 映射表, 计划会议三/四)
-/// - plan_pg / plan_mysql / plan_sqlite: 类型名归一化后匹配
-/// - pg_ssl_mode / mysql_ssl_mode / default_ssl_mode: B1 SSL 纯函数
-/// 全部为无 IO 纯函数, L1 单测全覆盖 (D1)
+//! WP5: 类型映射与 SSL 模式纯函数层
+//! - TypePlan: 列类型 → 读取策略 (A2-A4 映射表, 计划会议三/四)
+//! - plan_pg / plan_mysql / plan_sqlite: 类型名归一化后匹配
+//! - pg_ssl_mode / mysql_ssl_mode / default_ssl_mode: B1 SSL 纯函数
+//!
+//! 全部为无 IO 纯函数, L1 单测全覆盖 (D1)
 
 use sqlx::mysql::MySqlSslMode;
 use sqlx::postgres::PgSslMode;

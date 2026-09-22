@@ -1,5 +1,5 @@
-/// Tauri 2.0 IPC Command 控制器层
-/// 接收 React GUI 提交的请求，负责参数校验并调用后端服务处理
+//! Tauri 2.0 IPC Command 控制器层
+//! 接收 React GUI 提交的请求，负责参数校验并调用后端服务处理
 use crate::error::AppError;
 use crate::models::{ConnectionConfig, DbValue, QueryResult};
 use crate::services::ai_service::{AiConfig, AiConfigView, AiService, ChatMessage, StreamEvent};
@@ -228,7 +228,7 @@ pub async fn get_table_schema(
 
     let mut items = Vec::new();
     for r in query_res.rows {
-        let name = if let Some(DbValue::Text(v)) = r.get(0) {
+        let name = if let Some(DbValue::Text(v)) = r.first() {
             v.clone()
         } else {
             continue;
@@ -270,7 +270,7 @@ pub async fn get_process_list(
         Ok(query_res) => {
             let mut procs = Vec::new();
             for r in query_res.rows {
-                let pid_str = if let Some(DbValue::Text(v)) = r.get(0) {
+                let pid_str = if let Some(DbValue::Text(v)) = r.first() {
                     v.clone()
                 } else {
                     "0".into()
@@ -351,17 +351,17 @@ pub async fn get_db_users(
         if !query_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in query_res.rows {
-                let username = match r.get(0) {
+                let username = match r.first() {
                     Some(DbValue::Text(v)) | Some(DbValue::StringDecimal(v)) => v.clone(),
                     _ => continue,
                 };
                 let is_super = match r.get(1) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let can_createdb = match r.get(2) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
@@ -370,12 +370,12 @@ pub async fn get_db_users(
                     _ => None,
                 };
                 let is_curr = match r.get(4) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let is_mgr = match r.get(5) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
@@ -404,28 +404,28 @@ pub async fn get_db_users(
         if !mysql_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in mysql_res.rows {
-                let username = if let Some(DbValue::Text(v)) = r.get(0) {
+                let username = if let Some(DbValue::Text(v)) = r.first() {
                     v.clone()
                 } else {
                     "root".into()
                 };
                 let is_super = match r.get(1) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "1" || v == "true",
                     _ => false,
                 };
                 let can_createdb = match r.get(2) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "1" || v == "true",
                     _ => false,
                 };
                 let is_curr = match r.get(4) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "1" || v == "t" || v == "true",
                     _ => false,
                 };
                 let is_mgr = match r.get(5) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "1" || v == "t" || v == "true",
                     _ => false,
                 };
@@ -452,22 +452,22 @@ pub async fn get_db_users(
         if !pu_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in pu_res.rows {
-                let username = match r.get(0) {
+                let username = match r.first() {
                     Some(DbValue::Text(v)) | Some(DbValue::StringDecimal(v)) => v.clone(),
                     _ => continue,
                 };
                 let is_super = match r.get(1) {
-                    Some(DbValue::Bool(v)) => v.clone(),
+                    Some(DbValue::Bool(v)) => *v,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let can_createdb = match r.get(2) {
-                    Some(DbValue::Bool(v)) => v.clone(),
+                    Some(DbValue::Bool(v)) => *v,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let is_curr = match r.get(4) {
-                    Some(DbValue::Bool(v)) => v.clone(),
+                    Some(DbValue::Bool(v)) => *v,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
@@ -492,14 +492,14 @@ pub async fn get_db_users(
     // 4. 普通受限账户（未开全局读系统表，但被 GRANT 特权）
     let curr_sql = "SELECT current_user, pg_has_role(current_user, 'pg_read_all_stats', 'member') AS is_granted;";
     if let Ok(curr_res) = db_service.execute_query(&conn_id, curr_sql, true).await {
-        if let Some(r) = curr_res.rows.get(0) {
-            let username = if let Some(DbValue::Text(v)) = r.get(0) {
+        if let Some(r) = curr_res.rows.first() {
+            let username = if let Some(DbValue::Text(v)) = r.first() {
                 v.clone()
             } else {
                 "current_user".into()
             };
             let is_granted = match r.get(1) {
-                Some(DbValue::Bool(v)) => v.clone(),
+                Some(DbValue::Bool(v)) => *v,
                 Some(DbValue::Text(v)) => v == "t" || v == "true",
                 _ => false,
             };

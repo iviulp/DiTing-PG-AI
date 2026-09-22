@@ -1,7 +1,7 @@
-/// WP6-S4: .ditingvault 备份 bundle 加解密核心 (纯函数, 可测)
-/// - v2: 用户主密码 → Argon2id → HKDF(bundle) → AES-256-GCM, base64 编码
-/// - legacy v1: 旧内置固定密钥 (urlencoding 编码) — 仅迁移期兼容, 带移除标记
-/// commands 层只负责限速/文件 IO, 加解密与格式判定全在此, 便于 T4-T8 单测
+//! WP6-S4: .ditingvault 备份 bundle 加解密核心 (纯函数, 可测)
+//! - v2: 用户主密码 → Argon2id → HKDF(bundle) → AES-256-GCM, base64 编码
+//! - legacy v1: 旧内置固定密钥 (urlencoding 编码) — 仅迁移期兼容, 带移除标记
+//! commands 层只负责限速/文件 IO, 加解密与格式判定全在此, 便于 T4-T8 单测
 use crate::services::vault::crypto::{
     aes_gcm_decrypt, aes_gcm_encrypt, b64_decode, b64_encode, derive_key_argon2id, hkdf_subkey,
     random_salt, zeroize_key, INFO_BUNDLE,

@@ -1,8 +1,8 @@
-/// AI 智能体核心服务 (WP2 重构版)
-/// - OpenAI 兼容协议直连 (reqwest); rig-core 已按会议决议移除
-/// - 多轮对话: 前端传 history, 后端拼装 system + 截断历史 + 当前 user (无状态)
-/// - 流式输出: SSE 解析 (services/sse.rs) + sink 回调, 由 IPC Channel 层推送
-/// - api_key 加密落盘: services/secret_store.rs (Argon2id + AES-256-GCM), 旧明文无感迁移
+//! AI 智能体核心服务 (WP2 重构版)
+//! - OpenAI 兼容协议直连 (reqwest); rig-core 已按会议决议移除
+//! - 多轮对话: 前端传 history, 后端拼装 system + 截断历史 + 当前 user (无状态)
+//! - 流式输出: SSE 解析 (services/sse.rs) + sink 回调, 由 IPC Channel 层推送
+//! - api_key 加密落盘: services/secret_store.rs (Argon2id + AES-256-GCM), 旧明文无感迁移
 
 use crate::error::AppError;
 use crate::services::secret_store::{decrypt_secret, encrypt_secret, EncryptedBlob};
@@ -244,8 +244,10 @@ impl AiService {
     /// 测试构造器: 指定 base_url + 临时配置路径
     #[cfg(test)]
     pub fn with_base_url(base_url: &str) -> Self {
-        let mut cfg = AiConfig::default();
-        cfg.base_url = base_url.to_string();
+        let cfg = AiConfig {
+            base_url: base_url.to_string(),
+            ..Default::default()
+        };
         let path = std::env::temp_dir().join(format!("aidb_test_ai_config_{}.json", uuid::Uuid::new_v4()));
         Self {
             config: Arc::new(RwLock::new(cfg)),
@@ -378,6 +380,7 @@ impl AiService {
     }
 
     /// 获取当前配置 (内存态含明文 key — 仅限后端内部使用; IPC 出口必须走 get_config_view)
+    #[allow(dead_code)] // 后端内部 API + 测试断言; IPC 出口走 get_config_view
     pub async fn get_config(&self) -> AiConfig {
         self.config.read().await.clone()
     }
@@ -647,8 +650,10 @@ mod tests {
 
     #[test]
     fn config_view_masks_key() {
-        let mut cfg = AiConfig::default();
-        cfg.api_key = "sk-1234567890abcd".into();
+        let cfg = AiConfig {
+            api_key: "sk-1234567890abcd".into(),
+            ..Default::default()
+        };
         let view = cfg.to_view();
         assert!(view.has_key);
         assert_eq!(view.key_tail4.as_deref(), Some("abcd"));
@@ -902,15 +907,19 @@ mod tests {
     async fn update_config_keep_placeholder_preserves_key() {
         // KEEP 占位符语义: 前端未改 key 时传 __KEEP__, 后端保留原值
         let svc = AiService::with_base_url("http://x/v1");
-        let mut cfg = AiConfig::default();
-        cfg.api_key = "sk-original".into();
+        let cfg = AiConfig {
+            api_key: "sk-original".into(),
+            ..Default::default()
+        };
         {
             let mut lock = svc.config.write().await;
             *lock = cfg.clone();
         }
-        let mut update = AiConfig::default();
-        update.api_key = "__KEEP__".into();
-        update.model_name = "new-model".into();
+        let update = AiConfig {
+            api_key: "__KEEP__".into(),
+            model_name: "new-model".into(),
+            ..Default::default()
+        };
         // 注: update_config 会写默认路径, 测试环境 HOME 可写, 仅验证内存语义
         svc.update_config(update).await.unwrap();
         let now = svc.get_config().await;

@@ -1,9 +1,10 @@
-/// WP6-S2: KEK 管理层
-/// KekProvider trait 三实现:
-/// - KeychainKek: macOS Keychain (keyring crate, service=com.diting.aidb, account=vault-kek-v1)
-/// - FileKek: ~/.aidb/.kek (0600), keychain 不可用时降级
-/// - MemoryKek: 测试专用
-/// 运行期探测 + 降级 + provider 名日志
+//! WP6-S2: KEK 管理层
+//! KekProvider trait 三实现:
+//! - KeychainKek: macOS Keychain (keyring crate, service=com.diting.aidb, account=vault-kek-v1)
+//! - FileKek: ~/.aidb/.kek (0600), keychain 不可用时降级
+//! - MemoryKek: 测试专用
+//!
+//! 运行期探测 + 降级 + provider 名日志
 
 use super::crypto::KEY_LEN;
 
@@ -27,7 +28,8 @@ pub fn aidb_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
-/// macOS Keychain 实现
+/// macOS Keychain 实现 (prod KEK 首选; vault_service 在 cfg(not(test)) 下经 resolve_kek 使用)
+#[allow(dead_code)] // prod 路径经 resolve_kek(); test 构建走 FileKek::with_dir 分支
 pub struct KeychainKek;
 
 impl KekProvider for KeychainKek {
@@ -70,9 +72,11 @@ pub struct FileKek {
 }
 
 impl FileKek {
+    #[allow(dead_code)] // prod KEK 降级构造 (resolve_kek 内); test 用 with_dir
     pub fn new() -> Result<Self, String> {
         Ok(Self { dir: aidb_dir()? })
     }
+    #[allow(dead_code)] // 测试注入目录 (不触碰 keychain/真实 ~/.aidb)
     pub fn with_dir(dir: std::path::PathBuf) -> Self {
         Self { dir }
     }
@@ -118,11 +122,13 @@ pub fn atomic_write_secret(path: &std::path::Path, data: &[u8]) -> Result<(), St
 }
 
 /// 测试用内存 KEK
+#[allow(dead_code)] // 测试专用 provider (KEK 单测)
 pub struct MemoryKek {
     pub kek: std::sync::Mutex<Option<[u8; KEY_LEN]>>,
 }
 
 impl MemoryKek {
+    #[allow(dead_code)] // 测试构造器
     pub fn new() -> Self {
         Self { kek: std::sync::Mutex::new(None) }
     }
@@ -145,6 +151,7 @@ impl KekProvider for MemoryKek {
 }
 
 /// 运行期探测: Keychain → File 降级
+#[allow(dead_code)] // prod KEK 解析入口; vault_service 在 cfg(not(test)) 调用
 pub fn resolve_kek() -> Result<([u8; KEY_LEN], &'static str), String> {
     let kc = KeychainKek;
     match kc.get_or_create() {

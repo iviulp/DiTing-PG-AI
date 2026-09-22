@@ -1,6 +1,6 @@
-/// WP2: OpenAI 兼容 SSE (Server-Sent Events) 增量解析器 — 纯逻辑模块, 与 reqwest/Channel 解耦
-/// 处理: 半行跨 chunk 缓冲、UTF-8 多字节跨 chunk 切断、data: [DONE]、
-///       注释行 (:xxx)、空行/心跳、CRLF 行尾、delta.content 为 null、非法 JSON 帧跳过。
+//! WP2: OpenAI 兼容 SSE (Server-Sent Events) 增量解析器 — 纯逻辑模块, 与 reqwest/Channel 解耦
+//! 处理: 半行跨 chunk 缓冲、UTF-8 多字节跨 chunk 切断、data: [DONE]、
+//!       注释行 (:xxx)、空行/心跳、CRLF 行尾、delta.content 为 null、非法 JSON 帧跳过。
 
 use serde::Deserialize;
 
@@ -37,12 +37,7 @@ impl SseParser {
         let mut out = Vec::new();
         self.pending.extend_from_slice(chunk);
 
-        loop {
-            // 按 \n 切分完整行; 余量留在 pending
-            let newline_pos = match self.pending.iter().position(|&b| b == b'\n') {
-                Some(p) => p,
-                None => break,
-            };
+        while let Some(newline_pos) = self.pending.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = self.pending.drain(..=newline_pos).collect();
             // 去掉行尾 \n 与可能的 \r (CRLF)
             let mut line = line_bytes;

@@ -1,9 +1,9 @@
-/// 基于 sqlparser-rs 的 SQL AST 抽象语法树安全审查引擎 (WP1 重构版)
-/// - 三方言支持: PostgreSQL / MySQL / SQLite
-/// - 风险分级: Safe / Warning / Critical (未显式列出的语句类型 fail-safe 归 Critical)
-/// - read_only AST 白名单: 仅放行 Query / Explain(内层Query) / SHOW 族 / Pragma
-///
-/// 安全判定唯一收敛点: db_service.execute_query (前端判断仅为体验层, 不作安全依据)
+//! 基于 sqlparser-rs 的 SQL AST 抽象语法树安全审查引擎 (WP1 重构版)
+//! - 三方言支持: PostgreSQL / MySQL / SQLite
+//! - 风险分级: Safe / Warning / Critical (未显式列出的语句类型 fail-safe 归 Critical)
+//! - read_only AST 白名单: 仅放行 Query / Explain(内层Query) / SHOW 族 / Pragma
+//!
+//! 安全判定唯一收敛点: db_service.execute_query (前端判断仅为体验层, 不作安全依据)
 
 use crate::error::AppError;
 use crate::models::DatabaseType;

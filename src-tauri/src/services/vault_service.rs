@@ -1,9 +1,9 @@
-/// WP6-S3: VaultService 加密存储层
-/// - ~/.aidb/connections.enc: 全量连接配置 (含密码), KEK→HKDF(connections)→AES-256-GCM
-/// - ~/.aidb/ai_config.enc: AI 配置 (含 api_key), KEK→HKDF(aiconfig)→AES-256-GCM
-/// - 文件格式: {"format":"AIDB_ENC_V1","salt":b64,"nonce":b64,"ciphertext":b64}
-/// - 原子写 (临时文件 + rename + fsync + 0600)
-/// - API: list(脱敏) / upsert / delete / get_secret / ai_config get(脱敏)/set(占位保留)
+//! WP6-S3: VaultService 加密存储层
+//! - ~/.aidb/connections.enc: 全量连接配置 (含密码), KEK→HKDF(connections)→AES-256-GCM
+//! - ~/.aidb/ai_config.enc: AI 配置 (含 api_key), KEK→HKDF(aiconfig)→AES-256-GCM
+//! - 文件格式: {"format":"AIDB_ENC_V1","salt":b64,"nonce":b64,"ciphertext":b64}
+//! - 原子写 (临时文件 + rename + fsync + 0600)
+//! - API: list(脱敏) / upsert / delete / get_secret / ai_config get(脱敏)/set(占位保留)
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -155,7 +155,7 @@ impl VaultService {
             let fk = FileKek::with_dir(self.dir.clone());
             let k = fk.get_or_create().map_err(VaultError::Kek)?;
             *guard = Some((k, fk.name()));
-            return Ok(k);
+            Ok(k)
         }
         #[cfg(not(test))]
         {
