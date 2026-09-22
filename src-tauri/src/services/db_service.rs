@@ -25,6 +25,160 @@ pub enum AnyPool {
 const SELECT_ESCAPE_ERROR: &str =
     "SELECT 'Invalid input: contains control characters' AS \"Error\";";
 
+// ============ WP5 A5: 类型保真读取器 (宏生成三栈实现, 后端特化 unsigned/i8) ============
+
+use crate::services::value_mapping::TypePlan;
+
+/// 后端特化 try_get: u64/u32/i8 仅 MySQL 支持, 其余后端返回 Decode 错误走降级链
+macro_rules! try_typed {
+    (mysql, u64, $r:expr, $i:expr) => { $r.try_get::<u64, _>($i) };
+    (pg, decimal, $r:expr, $i:expr) => { $r.try_get::<bigdecimal::BigDecimal, _>($i) };
+    (mysql, decimal, $r:expr, $i:expr) => { $r.try_get::<bigdecimal::BigDecimal, _>($i) };
+    (sqlite, decimal, $r:expr, $i:expr) => {
+        Err::<bigdecimal::BigDecimal, sqlx::Error>(sqlx::Error::Decode("BigDecimal not supported on sqlite".into()))
+    };
+    (mysql, u32, $r:expr, $i:expr) => { $r.try_get::<u32, _>($i) };
+    (mysql, i8, $r:expr, $i:expr) => { $r.try_get::<i8, _>($i) };
+    ($b:ident, u64, $r:expr, $i:expr) => {
+        Err::<u64, sqlx::Error>(sqlx::Error::Decode("u64 not supported on this backend".into()))
+    };
+    ($b:ident, u32, $r:expr, $i:expr) => {
+        Err::<u32, sqlx::Error>(sqlx::Error::Decode("u32 not supported on this backend".into()))
+    };
+    ($b:ident, i8, $r:expr, $i:expr) => {
+        Err::<i8, sqlx::Error>(sqlx::Error::Decode("i8 not supported on this backend".into()))
+    };
+}
+
+macro_rules! impl_read_db_value {
+    ($fn:ident, $row:ty, $backend:ident) => {
+        /// 按 TypePlan 读取单元格; NULL 类型无关先行判定; 失败走降级链,
+        /// 最终失败产出 Text("<decode error: …>") + warn (禁止静默变 Null)
+        fn $fn(r: &$row, i: usize, col_name: &str, plan: TypePlan) -> DbValue {
+            use sqlx::Row as _;
+            if let Ok(vr) = <$row as sqlx::Row>::try_get_raw(r, i) {
+                use sqlx::ValueRef as _;
+                if vr.is_null() {
+                    return DbValue::Null;
+                }
+            }
+            let decode_error = |e: sqlx::Error, expect: &str| -> DbValue {
+                tracing::warn!(target: "DB::TYPE", column = %col_name, plan = ?plan, "类型读取降级 ({expect}): {e}");
+                // 动态降级链: i64 → f64 → bool → String → bytes hex → 显式错误文本
+                r.try_get::<i64, _>(i)
+                    .map(DbValue::Int)
+                    .or_else(|_| r.try_get::<f64, _>(i).map(DbValue::Float))
+                    .or_else(|_| r.try_get::<bool, _>(i).map(DbValue::Bool))
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::Text))
+                    .or_else(|_| {
+                        r.try_get::<Vec<u8>, _>(i)
+                            .map(|b| DbValue::BytesHex(crate::services::value_mapping::bytes_to_hex(&b)))
+                    })
+                    .unwrap_or_else(|_| DbValue::Text(format!("<decode error: {e}>")))
+            };
+            match plan {
+                TypePlan::Int64 => r
+                    .try_get::<i64, _>(i)
+                    .map(DbValue::Int)
+                    .unwrap_or_else(|e| decode_error(e, "i64")),
+                TypePlan::Int32 => r
+                    .try_get::<i32, _>(i)
+                    .map(|v| DbValue::Int(v as i64))
+                    .or_else(|_| r.try_get::<i64, _>(i).map(DbValue::Int))
+                    .unwrap_or_else(|e| decode_error(e, "i32")),
+                TypePlan::Int16 => r
+                    .try_get::<i16, _>(i)
+                    .map(|v| DbValue::Int(v as i64))
+                    .or_else(|_| r.try_get::<i32, _>(i).map(|v| DbValue::Int(v as i64)))
+                    .or_else(|_| r.try_get::<i64, _>(i).map(DbValue::Int))
+                    .unwrap_or_else(|e| decode_error(e, "i16")),
+                TypePlan::UInt64Decimal => try_typed!($backend, u64, r, i)
+                    .map(|v| DbValue::StringDecimal(v.to_string()))
+                    .or_else(|_| {
+                        try_typed!($backend, decimal, r, i)
+                            .map(|v| DbValue::StringDecimal(v.to_string()))
+                    })
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::StringDecimal))
+                    .unwrap_or_else(|e| decode_error(e, "u64/decimal")),
+                TypePlan::UInt32 => try_typed!($backend, u32, r, i)
+                    .map(|v| DbValue::Int(v as i64))
+                    .or_else(|_| r.try_get::<i64, _>(i).map(DbValue::Int))
+                    .unwrap_or_else(|e| decode_error(e, "u32")),
+                TypePlan::Float64 => r
+                    .try_get::<f64, _>(i)
+                    .map(DbValue::Float)
+                    .unwrap_or_else(|e| decode_error(e, "f64")),
+                TypePlan::Float32 => r
+                    .try_get::<f32, _>(i)
+                    .map(|v| DbValue::Float(v as f64))
+                    .or_else(|_| r.try_get::<f64, _>(i).map(DbValue::Float))
+                    .unwrap_or_else(|e| decode_error(e, "f32")),
+                TypePlan::Bool => r
+                    .try_get::<bool, _>(i)
+                    .map(DbValue::Bool)
+                    .or_else(|_| try_typed!($backend, i8, r, i).map(|v| DbValue::Bool(v != 0)))
+                    .or_else(|_| r.try_get::<i64, _>(i).map(|v| DbValue::Bool(v != 0)))
+                    .or_else(|_| {
+                        r.try_get::<String, _>(i)
+                            .map(|s| DbValue::Bool(s == "t" || s == "true" || s == "1"))
+                    })
+                    .unwrap_or_else(|e| decode_error(e, "bool")),
+                TypePlan::DecimalStr => try_typed!($backend, decimal, r, i)
+                    .map(|v| DbValue::StringDecimal(v.to_string()))
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::StringDecimal))
+                    .or_else(|_| r.try_get::<f64, _>(i).map(|v| DbValue::StringDecimal(v.to_string())))
+                    .unwrap_or_else(|e| decode_error(e, "decimal")),
+                TypePlan::Timestamp => r
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+                    .map(|dt| DbValue::Timestamp(dt.format("%Y-%m-%d %H:%M:%S%.3f%:z").to_string()))
+                    .or_else(|_| {
+                        r.try_get::<chrono::NaiveDateTime, _>(i)
+                            .map(|n| DbValue::Timestamp(n.format("%Y-%m-%d %H:%M:%S%.3f").to_string()))
+                    })
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::Timestamp))
+                    .unwrap_or_else(|e| decode_error(e, "timestamp")),
+                TypePlan::Date => r
+                    .try_get::<chrono::NaiveDate, _>(i)
+                    .map(|d| DbValue::Timestamp(d.format("%Y-%m-%d").to_string()))
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::Timestamp))
+                    .unwrap_or_else(|e| decode_error(e, "date")),
+                TypePlan::Time => r
+                    .try_get::<chrono::NaiveTime, _>(i)
+                    .map(|t| DbValue::Timestamp(t.format("%H:%M:%S").to_string()))
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::Timestamp))
+                    .unwrap_or_else(|e| decode_error(e, "time")),
+                TypePlan::Uuid => r
+                    .try_get::<uuid::Uuid, _>(i)
+                    .map(|u| DbValue::Text(u.to_string()))
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::Text))
+                    .unwrap_or_else(|e| decode_error(e, "uuid")),
+                TypePlan::Json => r
+                    .try_get::<serde_json::Value, _>(i)
+                    .map(|v| DbValue::Json(v.to_string()))
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::Json))
+                    .unwrap_or_else(|e| decode_error(e, "json")),
+                TypePlan::BytesHex => r
+                    .try_get::<Vec<u8>, _>(i)
+                    .map(|b| DbValue::BytesHex(crate::services::value_mapping::bytes_to_hex(&b)))
+                    .or_else(|_| r.try_get::<String, _>(i).map(DbValue::Text))
+                    .unwrap_or_else(|e| decode_error(e, "bytes")),
+                TypePlan::Text => r
+                    .try_get::<String, _>(i)
+                    .map(DbValue::Text)
+                    .unwrap_or_else(|e| decode_error(e, "text")),
+                TypePlan::Fallback => decode_error(
+                    sqlx::Error::Decode("fallback".into()),
+                    "unknown type → 动态降级链",
+                ),
+            }
+        }
+    };
+}
+
+impl_read_db_value!(read_pg_value, sqlx::postgres::PgRow, pg);
+impl_read_db_value!(read_mysql_value, sqlx::mysql::MySqlRow, mysql);
+impl_read_db_value!(read_sqlite_value, sqlx::sqlite::SqliteRow, sqlite);
+
 /// 全局连接池调度服务
 pub struct DbService {
     pools: Arc<RwLock<HashMap<String, (AnyPool, ConnectionConfig)>>>,
@@ -180,19 +334,31 @@ impl DbService {
 
         let pool = match config.db_type {
             DatabaseType::Postgres => {
+                // WP5 B1: ssl_mode 接入 (原字段已存在但从未使用) + WP4 技术债: user/database 也过编码
+                let encoded_user = urlencoding::encode(&config.user);
                 let encoded_pass = urlencoding::encode(config.password.as_deref().unwrap_or(""));
+                let encoded_db = urlencoding::encode(&config.database);
                 let url = format!(
                     "postgres://{}:{}@{}:{}/{}",
-                    config.user,
+                    encoded_user,
                     encoded_pass,
                     eff_host,
                     eff_port,
-                    config.database
+                    encoded_db
                 );
+                // 默认策略基于原始 host (隧道时 eff_host 是 127.0.0.1, 不代表真实目标)
+                let ssl = crate::services::value_mapping::pg_ssl_mode(
+                    config.ssl_mode.as_deref().unwrap_or(""),
+                    &config.host,
+                );
+                let opts = url
+                    .parse::<sqlx::postgres::PgConnectOptions>()
+                    .map_err(|e| AppError::Database(format!("连接串解析失败: {e}")))?
+                    .ssl_mode(ssl);
                 let p = PgPoolOptions::new()
                     .max_connections(5)
                     .acquire_timeout(std::time::Duration::from_secs(10))
-                    .connect(&url)
+                    .connect_with(opts)
                     .await
                     .map_err(|e| {
                         // 隧道模式下 DB 连接失败: 关隧道避免悬挂资源
@@ -201,7 +367,14 @@ impl DbService {
                             let cid = conn_id.clone();
                             tokio::spawn(async move { tunnels.close(&cid).await });
                         }
-                        AppError::Database(e.to_string())
+                        // B1 会议七: SSL 握手失败且默认策略 → 提示可显式 ssl_mode=disable 降级
+                        let mut msg = e.to_string();
+                        if config.ssl_mode.is_none()
+                            && !crate::services::value_mapping::is_loopback(&config.host)
+                        {
+                            msg.push_str(" (提示: 默认 ssl_mode=require, 如服务器不支持 SSL 可在连接配置中显式设置 ssl_mode=disable)");
+                        }
+                        AppError::Database(msg)
                     })?;
                 // WP4 步骤2: standard_conforming_strings 基线检查 (off 时反斜杠有转义语义, 告警)
                 {
@@ -220,19 +393,30 @@ impl DbService {
                 AnyPool::Postgres(p)
             }
             DatabaseType::Mysql => {
+                // WP5 B1: MySQL ssl_mode 接入 (verify-full → VerifyIdentity)
+                let encoded_user = urlencoding::encode(&config.user);
                 let encoded_pass = urlencoding::encode(config.password.as_deref().unwrap_or(""));
+                let encoded_db = urlencoding::encode(&config.database);
                 let url = format!(
                     "mysql://{}:{}@{}:{}/{}",
-                    config.user,
+                    encoded_user,
                     encoded_pass,
                     eff_host,
                     eff_port,
-                    config.database
+                    encoded_db
                 );
+                let ssl = crate::services::value_mapping::mysql_ssl_mode(
+                    config.ssl_mode.as_deref().unwrap_or(""),
+                    &config.host,
+                );
+                let opts = url
+                    .parse::<sqlx::mysql::MySqlConnectOptions>()
+                    .map_err(|e| AppError::Database(format!("连接串解析失败: {e}")))?
+                    .ssl_mode(ssl);
                 let p = MySqlPoolOptions::new()
                     .max_connections(5)
                     .acquire_timeout(std::time::Duration::from_secs(10))
-                    .connect(&url)
+                    .connect_with(opts)
                     .await
                     .map_err(|e| {
                         if use_tunnel {
@@ -240,7 +424,13 @@ impl DbService {
                             let cid = conn_id.clone();
                             tokio::spawn(async move { tunnels.close(&cid).await });
                         }
-                        AppError::Database(e.to_string())
+                        let mut msg = e.to_string();
+                        if config.ssl_mode.is_none()
+                            && !crate::services::value_mapping::is_loopback(&config.host)
+                        {
+                            msg.push_str(" (提示: 默认 ssl_mode=require, 如服务器不支持 SSL 可在连接配置中显式设置 ssl_mode=disable)");
+                        }
+                        AppError::Database(msg)
                     })?;
                 AnyPool::MySql(p)
             }
@@ -356,46 +546,9 @@ impl DbService {
                     let mut row_vals = Vec::new();
                     for (i, col) in r.columns().iter().enumerate() {
                         let type_name = col.type_info().name();
-                        let db_val = match type_name {
-                            "INT8" | "BIGINT" => {
-                                r.try_get::<i64, _>(i).map(DbValue::Int).unwrap_or(DbValue::Null)
-                            }
-                            "INT4" | "INT" | "INTEGER" => {
-                                r.try_get::<i32, _>(i).map(|v| DbValue::Int(v as i64)).unwrap_or(DbValue::Null)
-                            }
-                            "INT2" | "SMALLINT" => {
-                                r.try_get::<i16, _>(i).map(|v| DbValue::Int(v as i64)).unwrap_or(DbValue::Null)
-                            }
-                            "BOOL" | "BOOLEAN" => {
-                                if let Ok(b) = r.try_get::<bool, _>(i) {
-                                    DbValue::Bool(b)
-                                } else if let Ok(s) = r.try_get::<String, _>(i) {
-                                    DbValue::Bool(s == "t" || s == "true" || s == "1")
-                                } else {
-                                    DbValue::Null
-                                }
-                            }
-                            "TIMESTAMPTZ" | "TIMESTAMP" => {
-                                if let Ok(dt) = r.try_get::<chrono::DateTime<chrono::Utc>, _>(i) {
-                                    DbValue::Timestamp(dt.format("%Y-%m-%d %H:%M:%S.%3f%z").to_string())
-                                } else if let Ok(naive) = r.try_get::<chrono::NaiveDateTime, _>(i) {
-                                    DbValue::Timestamp(naive.format("%Y-%m-%d %H:%M:%S").to_string())
-                                } else {
-                                    r.try_get::<String, _>(i).map(DbValue::Text).unwrap_or(DbValue::Null)
-                                }
-                            }
-                            "UUID" => {
-                                r.try_get::<uuid::Uuid, _>(i).map(|v| DbValue::Text(v.to_string())).unwrap_or(DbValue::Null)
-                            }
-                            _ => {
-                                if let Ok(b) = r.try_get::<bool, _>(i) {
-                                    DbValue::Bool(b)
-                                } else {
-                                    r.try_get::<String, _>(i).map(DbValue::Text).unwrap_or(DbValue::Null)
-                                }
-                            }
-                        };
-                        row_vals.push(db_val);
+                        // WP5: TypePlan 驱动 + 类型保真读取 (替代原 unwrap_or(Null) 静默丢弃)
+                        let plan = crate::services::value_mapping::plan_pg(type_name);
+                        row_vals.push(read_pg_value(&r, i, col.name(), plan));
                     }
                     result_rows.push(row_vals);
                     rows_fetched += 1;
@@ -440,9 +593,11 @@ impl DbService {
                     }
 
                     let mut row_vals = Vec::new();
-                    for (i, _) in r.columns().iter().enumerate() {
-                        let val: String = r.try_get::<String, _>(i).unwrap_or_else(|_| "NULL".into());
-                        row_vals.push(DbValue::Text(val));
+                    for (i, col) in r.columns().iter().enumerate() {
+                        // WP5: MySQL 原为全列 String 降级, 现按 TypePlan 类型保真读取
+                        let type_name = col.type_info().name();
+                        let plan = crate::services::value_mapping::plan_mysql(type_name, false);
+                        row_vals.push(read_mysql_value(&r, i, col.name(), plan));
                     }
                     result_rows.push(row_vals);
                     rows_fetched += 1;
@@ -487,9 +642,11 @@ impl DbService {
                     }
 
                     let mut row_vals = Vec::new();
-                    for (i, _) in r.columns().iter().enumerate() {
-                        let val: String = r.try_get::<String, _>(i).unwrap_or_else(|_| "NULL".into());
-                        row_vals.push(DbValue::Text(val));
+                    for (i, col) in r.columns().iter().enumerate() {
+                        // WP5: SQLite 原为全列 String 降级, 现按声明类型 TypePlan 读取 (动态类型走降级链)
+                        let type_name = col.type_info().name();
+                        let plan = crate::services::value_mapping::plan_sqlite(type_name);
+                        row_vals.push(read_sqlite_value(&r, i, col.name(), plan));
                     }
                     result_rows.push(row_vals);
                     rows_fetched += 1;

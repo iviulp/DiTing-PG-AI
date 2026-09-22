@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { QueryResult, QueryResultTabItem } from '../types';
 import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle } from 'lucide-react';
 import { RowDetailDrawer } from './RowDetailDrawer';
+import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
 
 interface DataGridProps {
   result: QueryResult | null;
@@ -471,9 +472,9 @@ export const DataGrid: React.FC<DataGridProps> = ({
                     const colName = result.columns[cIdx]?.name || `col_${cIdx}`;
                     const key = `${rIdx}_${colName}`;
                     const isModified = key in edits;
-                    const displayVal = isModified ? edits[key] : String(cell.val);
+                    const displayVal = isModified ? edits[key] : formatDbValue(cell);
                     const isEditing = editingCell?.rowIdx === rIdx && editingCell?.colName === colName;
-                    const isNull = displayVal === 'NULL';
+                    const isNull = isModified ? displayVal === 'NULL' : isDbValueNull(cell);
 
                     return (
                       <td
@@ -654,10 +655,12 @@ export const DataGrid: React.FC<DataGridProps> = ({
               ? result.columns.map((col, idx) => {
                   const key = `${drawerRowIndex}_${col.name}`;
                   const isModified = key in edits;
-                  const rawVal = result.rows[drawerRowIndex][idx]?.val;
-                  return { val: isModified ? edits[key] : rawVal };
+                  const cell = result.rows[drawerRowIndex][idx] ?? { type: 'Null', val: null };
+                  // WP5: 编辑覆盖时以 Text tag 传入 (提交路径由 sqlVal 按值判定); 未编辑保留原 tag
+                  return isModified ? { type: 'Text', val: edits[key] } : cell;
                 })
               : result.columns.map((col) => ({
+                  type: 'Text' as const,
                   val: addedRows[drawerRowIndex - originalLength]?.[col.name] ?? ''
                 }))
           }

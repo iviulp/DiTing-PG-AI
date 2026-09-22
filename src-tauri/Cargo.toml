@@ -33,6 +33,7 @@ sqlx = { version = "0.8", features = [
     "json",
     "bigdecimal"
 ] }
+bigdecimal = "0.4"
 
 # AI Agent Framework (HTTP Client, OpenAI-compatible; rig-core 已按 WP2 会议9决议移除——声明未用, 直连更可控)
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -65,4 +66,3 @@ dirs = "7"
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
-

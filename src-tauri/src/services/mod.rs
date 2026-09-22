@@ -6,4 +6,5 @@ pub mod secret_store;
 pub mod sql_escape;
 pub mod sse;
 pub mod tunnel_service;
+pub mod value_mapping;
 
