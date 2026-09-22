@@ -105,6 +105,24 @@ export interface AiConfig {
   api_key: string;
   model_name: string;
   temperature: number;
+  /** WP2: 上下文 token 预算 */
+  max_context_tokens?: number;
+  /** WP2: 输出预留 token */
+  reserved_output_tokens?: number;
+  /** WP2: 脱敏视图尾4位 (仅展示用) */
+  key_tail4?: string | null;
+}
+
+/** WP2: get_ai_config 返回的脱敏视图 (不含完整 api_key) */
+export interface AiConfigView {
+  provider_name: string;
+  base_url: string;
+  model_name: string;
+  temperature: number;
+  max_context_tokens: number;
+  reserved_output_tokens: number;
+  has_key: boolean;
+  key_tail4?: string | null;
 }
 
 /** WP1: SQL 风险等级 (与后端 RiskLevel serde 小写对齐) */

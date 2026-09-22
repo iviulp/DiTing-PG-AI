@@ -1,6 +1,14 @@
 import { create } from 'zustand';
 import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
-import { connectDb, executeSqlWithGuard, aiChat, updateAiConfig, getAiConfig } from '../services/ipc';
+import {
+  connectDb,
+  executeSqlWithGuard,
+  aiChat,
+  aiChatStream,
+  ChatMessage,
+  updateAiConfig,
+  getAiConfig
+} from '../services/ipc';
 
 /** WP1: 待确认的 Critical SQL (全局确认对话框状态) */
 export interface PendingSafetyConfirm {
@@ -29,7 +37,12 @@ interface AppState {
   runQuery: (sql: string) => Promise<void>;
   setAiConfig: (config: AiConfig) => Promise<void>;
   loadAiConfig: () => Promise<void>;
-  askAi: (prompt: string, schemaContext?: string) => Promise<string>;
+  askAi: (
+    prompt: string,
+    schemaContext?: string,
+    history?: ChatMessage[],
+    onDelta?: (text: string) => void
+  ) => Promise<string>;
   /** WP1: 用户在全局确认框做出选择 */
   resolveSafetyConfirm: (approved: boolean) => void;
 }
@@ -146,9 +159,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setAiConfig: async (config) => {
     try {
-      localStorage.setItem('aidb_ai_config', JSON.stringify(config));
-      await updateAiConfig(config);
-      set({ aiConfig: config });
+      // WP2: 完整配置 (含 key/__KEEP__ 占位符) 只送后端加密落盘;
+      // localStorage 仅存非敏感字段, 绝不再缓存明文 api_key
+      const { api_key: _key, ...nonSensitive } = config;
+      localStorage.setItem('aidb_ai_config', JSON.stringify(nonSensitive));
+      // 留空 + 原本已存 key → 传占位符, 后端保留原 key
+      let outConfig = config;
+      if (config.api_key.trim() === '' && get().aiConfig.api_key === '__KEEP__') {
+        outConfig = { ...config, api_key: '__KEEP__' };
+      }
+      await updateAiConfig(outConfig);
+      set({ aiConfig: { ...outConfig, key_tail4: outConfig.api_key === '__KEEP__' ? get().aiConfig.key_tail4 : (outConfig.api_key.slice(-4) || null) } });
     } catch (err: any) {
       set({ errorMsg: err.message || String(err) });
     }
@@ -156,32 +177,39 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   loadAiConfig: async () => {
     try {
-      const cfg = await getAiConfig();
-      if (cfg && cfg.api_key) {
+      // WP2: 后端返回脱敏视图 (无完整 api_key); 前端本地不再缓存明文 key,
+      // 保存时若用户未改 key 输入框则传 "__KEEP__" 占位符由后端保留原值。
+      const view: any = await getAiConfig();
+      if (view) {
+        const cfg: AiConfig = {
+          provider_name: view.provider_name,
+          base_url: view.base_url,
+          api_key: view.has_key ? '__KEEP__' : '',
+          model_name: view.model_name,
+          temperature: view.temperature,
+          max_context_tokens: view.max_context_tokens,
+          reserved_output_tokens: view.reserved_output_tokens,
+          key_tail4: view.key_tail4
+        };
         set({ aiConfig: cfg });
-        localStorage.setItem('aidb_ai_config', JSON.stringify(cfg));
-      } else {
-        const localCfg = localStorage.getItem('aidb_ai_config');
-        if (localCfg) {
-          const parsed = JSON.parse(localCfg);
-          set({ aiConfig: parsed });
-          await updateAiConfig(parsed);
-        }
       }
     } catch (err) {
-      const localCfg = localStorage.getItem('aidb_ai_config');
-      if (localCfg) {
-        try {
-          const parsed = JSON.parse(localCfg);
-          set({ aiConfig: parsed });
-        } catch {}
-      }
+      // 后端不可用时静默保持默认配置
+      console.warn('loadAiConfig failed:', err);
     }
   },
 
-  askAi: async (prompt, schemaContext) => {
+  askAi: async (prompt, schemaContext, history, onDelta) => {
     try {
-      return await aiChat(prompt, schemaContext);
+      // WP2: 优先流式 (Channel 逐 delta); 流式失败自动降级同步 aiChat 一次
+      if (onDelta) {
+        try {
+          return await aiChatStream(prompt, schemaContext, history, onDelta);
+        } catch (streamErr) {
+          console.warn('AI stream failed, falling back to sync aiChat:', streamErr);
+        }
+      }
+      return await aiChat(prompt, schemaContext, history);
     } catch (err: any) {
       throw new Error(err.message || String(err));
     }

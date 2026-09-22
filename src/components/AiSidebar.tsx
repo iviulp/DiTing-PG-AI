@@ -155,6 +155,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       { role: 'user', text: intentLabel ? `${intentLabel} ${userMsg}` : userMsg, intentTag: intent }
     ]);
     setLoading(true);
+    // WP2: 流式占位消息 id (catch 中也需访问, 声明于 try 外)
+    const streamMsgId = `stream_${Date.now()}`;
 
     try {
       let schemaContext = '';
@@ -229,7 +231,51 @@ PostgreSQL Data Type & Case Sensitivity Rules:
    - For timestamp/date/varchar/integer/jsonb, apply standard PostgreSQL operators.`;
       }
 
-      const reply = await askAi(userMsg, schemaContext);
+      // WP2: 多轮历史 — 从 chatLog 提取最近 ≤20 条 user/assistant (欢迎语除外), 后端负责 token 预算截断
+      const history: { role: 'user' | 'assistant'; content: string }[] = chatLog
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.text.startsWith('👋'))
+        .slice(-20)
+        .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.text }));
+
+      // WP2: 流式渲染 — 先插入占位 assistant 消息, delta 累积 + 50ms 节流 flush
+      let streamBuffer = '';
+      let lastFlush = 0;
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushToUi = () => {
+        const snapshot = streamBuffer;
+        setChatLog((prev) =>
+          prev.map((m) => ((m as any).id === streamMsgId ? { ...m, text: snapshot } : m))
+        );
+      };
+      const onDelta = (text: string) => {
+        streamBuffer += text;
+        const now = Date.now();
+        if (now - lastFlush >= 50) {
+          lastFlush = now;
+          flushToUi();
+        } else if (!flushTimer) {
+          flushTimer = setTimeout(() => {
+            flushTimer = null;
+            lastFlush = Date.now();
+            flushToUi();
+          }, 50);
+        }
+      };
+      setChatLog((prev) => [
+        ...prev,
+        { role: 'assistant', text: '', intentTag: undefined, ...( { id: streamMsgId } as any) }
+      ]);
+
+      let reply: string;
+      try {
+        reply = await askAi(userMsg, schemaContext, history, onDelta);
+      } finally {
+        if (flushTimer) clearTimeout(flushTimer);
+      }
+      // Done 后以 full_text 整体替换校验 (流式拼接可能与后端累积有细微差)
+      setChatLog((prev) =>
+        prev.map((m) => ((m as any).id === streamMsgId ? { ...m, text: reply } : m))
+      );
       const sqlMatch = reply.match(/```(?:sql)?([\s\S]*?)```/i);
       const extractedSql = sqlMatch && sqlMatch[1] ? sqlMatch[1].trim() : null;
 
@@ -262,21 +308,28 @@ PostgreSQL Data Type & Case Sensitivity Rules:
         }
       }
 
-      setChatLog((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: reply,
-          executedSql: extractedSql || undefined,
-          autoQueryResult,
-          isMutating
-        }
-      ]);
+      setChatLog((prev) =>
+        prev.map((m) =>
+          (m as any).id === streamMsgId
+            ? {
+                ...m,
+                text: reply,
+                executedSql: extractedSql || undefined,
+                autoQueryResult,
+                isMutating
+              }
+            : m
+        )
+      );
     } catch (err: any) {
-      setChatLog((prev) => [
-        ...prev,
-        { role: 'assistant', text: `⚠️ 请求 AI 失败: ${err.message || String(err)}` }
-      ]);
+      const errText = `⚠️ 请求 AI 失败: ${err.message || String(err)}`;
+      setChatLog((prev) => {
+        // 若流式占位消息已插入, 原地替换为错误气泡 (保留已生成部分被覆盖)
+        const hasPlaceholder = prev.some((m) => (m as any).id === streamMsgId);
+        return hasPlaceholder
+          ? prev.map((m) => ((m as any).id === streamMsgId ? { ...m, text: errText } : m))
+          : [...prev, { role: 'assistant', text: errText }];
+      });
     } finally {
       setLoading(false);
     }

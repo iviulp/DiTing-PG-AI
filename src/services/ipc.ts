@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
 
 /**
@@ -52,10 +52,46 @@ export async function executeSqlWithGuard(
 }
 
 /**
- * 触发 AI Agent 自然语言问答转 SQL
+ * 触发 AI Agent 自然语言问答转 SQL (WP2: 支持多轮 history; 保留为流式降级 fallback)
  */
-export async function aiChat(prompt: string, schemaContext?: string): Promise<string> {
-  return await invoke('ai_chat', { prompt, schemaContext });
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export async function aiChat(prompt: string, schemaContext?: string, history?: ChatMessage[]): Promise<string> {
+  return await invoke('ai_chat', { prompt, schemaContext, history: history ?? null });
+}
+
+/** WP2: 流式事件 (与后端 StreamEvent serde camelCase 对齐) */
+export type AiStreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'done'; fullText: string }
+  | { type: 'error'; message: string };
+
+/**
+ * WP2: AI 流式对话 — Tauri Channel 逐 delta 回调, resolve 完整文本;
+ * 后端返回 error 事件时 reject, 由调用方决定是否降级 aiChat。
+ */
+export async function aiChatStream(
+  prompt: string,
+  schemaContext: string | undefined,
+  history: ChatMessage[] | undefined,
+  onDelta: (text: string) => void
+): Promise<string> {
+  const channel = new Channel<AiStreamEvent>();
+  return await new Promise<string>((resolve, reject) => {
+    channel.onmessage = (msg) => {
+      if (msg.type === 'delta') {
+        onDelta(msg.text);
+      } else if (msg.type === 'done') {
+        resolve(msg.fullText);
+      } else if (msg.type === 'error') {
+        reject(new Error(msg.message));
+      }
+    };
+    invoke('ai_chat_stream', { prompt, schemaContext, history: history ?? null, channel }).catch(reject);
+  });
 }
 
 /**

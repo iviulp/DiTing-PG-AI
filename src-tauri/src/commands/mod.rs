@@ -2,7 +2,7 @@
 /// 接收 React GUI 提交的请求，负责参数校验并调用后端服务处理
 use crate::error::AppError;
 use crate::models::{ConnectionConfig, DbValue, QueryResult};
-use crate::services::ai_service::{AiConfig, AiService};
+use crate::services::ai_service::{AiConfig, AiConfigView, AiService, ChatMessage, StreamEvent};
 use crate::services::db_service::DbService;
 use serde::Serialize;
 use tauri::State;
@@ -369,18 +369,49 @@ pub async fn kill_process(
     Ok(())
 }
 
-/// AI 自然语言生成 SQL / 问答交互
+/// AI 自然语言生成 SQL / 问答交互 (WP2: 支持多轮 history; 保留为流式失败时的 fallback)
 #[tauri::command]
 pub async fn ai_chat(
     prompt: String,
     schema_context: Option<String>,
+    history: Option<Vec<ChatMessage>>,
     ai_service: State<'_, AiService>,
 ) -> Result<String, AppError> {
     tracing::info!(target: "IPC::CMD", "Received ai_chat IPC command");
-    ai_service.prompt(&prompt, schema_context.as_deref()).await
+    ai_service
+        .prompt(
+            history.as_deref().unwrap_or(&[]),
+            &prompt,
+            schema_context.as_deref(),
+        )
+        .await
+}
+
+/// WP2: AI 流式对话 — SSE delta 经 Tauri Channel 推送前端 (Delta/Done/Error 三态)
+#[tauri::command]
+pub async fn ai_chat_stream(
+    prompt: String,
+    schema_context: Option<String>,
+    history: Option<Vec<ChatMessage>>,
+    channel: tauri::ipc::Channel<StreamEvent>,
+    ai_service: State<'_, AiService>,
+) -> Result<(), AppError> {
+    tracing::info!(target: "IPC::CMD", "Received ai_chat_stream IPC command");
+    ai_service
+        .prompt_stream(
+            history.as_deref().unwrap_or(&[]),
+            &prompt,
+            schema_context.as_deref(),
+            move |event| {
+                // Channel send 失败 (前端已卸载) 时静默丢弃
+                let _ = channel.send(event);
+            },
+        )
+        .await
 }
 
 /// 更新自定义 AI Provider (BaseURL / Key) 配置
+/// WP2: api_key 传占位符 "__KEEP__" 或留空 (且原有 key) 时保留原 key; 落盘为加密格式
 #[tauri::command]
 pub async fn update_ai_config(
     config: AiConfig,
@@ -390,10 +421,10 @@ pub async fn update_ai_config(
     ai_service.update_config(config).await
 }
 
-/// 获取当前 AI Provider 配置
+/// 获取当前 AI Provider 配置 (WP2: 脱敏视图 — has_key + 尾4位, 绝不返回完整 key)
 #[tauri::command]
-pub async fn get_ai_config(ai_service: State<'_, AiService>) -> Result<AiConfig, AppError> {
-    Ok(ai_service.get_config().await)
+pub async fn get_ai_config(ai_service: State<'_, AiService>) -> Result<AiConfigView, AppError> {
+    Ok(ai_service.get_config_view().await)
 }
 
 /// 自动打开并跳转到用户指定的文件夹 (或系统 Downloads 目录) (macOS Finder / Windows Explorer)

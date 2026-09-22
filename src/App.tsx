@@ -337,9 +337,9 @@ export const App: React.FC = () => {
                   <label className="block text-slate-400 mb-1">API Key</label>
                   <input
                     type="password"
-                    value={tempAiConfig.api_key}
+                    value={tempAiConfig.api_key === '__KEEP__' ? '' : tempAiConfig.api_key}
                     onChange={(e) => setTempAiConfig({ ...tempAiConfig, api_key: e.target.value })}
-                    placeholder="sk-..."
+                    placeholder={tempAiConfig.key_tail4 ? `已保存 (****${tempAiConfig.key_tail4})，留空则不修改` : 'sk-...'}
                     className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded text-slate-100"
                   />
                 </div>
@@ -875,9 +875,9 @@ export const App: React.FC = () => {
                 <label className="block text-slate-400 mb-1">API Key</label>
                 <input
                   type="password"
-                  value={tempAiConfig.api_key}
+                  value={tempAiConfig.api_key === '__KEEP__' ? '' : tempAiConfig.api_key}
                   onChange={(e) => setTempAiConfig({ ...tempAiConfig, api_key: e.target.value })}
-                  placeholder="sk-..."
+                  placeholder={tempAiConfig.key_tail4 ? `已保存 (****${tempAiConfig.key_tail4})，留空则不修改` : 'sk-...'}
                   className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded text-slate-100"
                 />
               </div>

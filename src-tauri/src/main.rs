@@ -36,6 +36,7 @@ fn main() {
             commands::kill_process,
             commands::get_db_users,
             commands::ai_chat,
+            commands::ai_chat_stream,
             commands::update_ai_config,
             commands::get_ai_config,
             commands::open_downloads_folder,
