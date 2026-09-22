@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { ConnectionConfig, QueryResult, AiConfig } from '../types';
+import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
 
 /**
  * 建立与注册数据库连接
@@ -9,10 +9,46 @@ export async function connectDb(config: ConnectionConfig): Promise<void> {
 }
 
 /**
- * 执行任意 SQL 语句并获取强类型结果集
+ * 执行任意 SQL 语句并获取强类型结果集 (低层原语)
+ * WP1: force=true 表示用户已确认 Critical 风险, 仅豁免确认策略, 不豁免 read_only
  */
-export async function executeSql(connId: string, sql: string): Promise<QueryResult> {
-  return await invoke('execute_sql', { connId, sql });
+export async function executeSql(connId: string, sql: string, force?: boolean): Promise<QueryResult> {
+  return await invoke('execute_sql', { connId, sql, force: force ?? null });
+}
+
+/** 判断 invoke 错误是否为需二次确认的 Critical 安全拦截 */
+export function isSafetyConfirmationError(err: any): err is SafetyBlockedPayload {
+  return (
+    err &&
+    typeof err === 'object' &&
+    err.code === 'SAFETY_BLOCKED' &&
+    err.requires_confirmation === true
+  );
+}
+
+/**
+ * WP1: 带 Critical 二次确认语义的统一执行封装 (唯一入口, 安全判定以后端为准)
+ * 流程: executeSql → 后端返回 SAFETY_BLOCKED+requires_confirmation → confirm(payload)
+ *       用户同意后携带原始 SQL (一字不改) + force=true 重发; 拒绝则抛出原错误。
+ * read_only 拦截 (无 requires_confirmation) 直接 throw, 不提供 force 通道。
+ */
+export async function executeSqlWithGuard(
+  connId: string,
+  sql: string,
+  confirm: (payload: SafetyBlockedPayload) => Promise<boolean>
+): Promise<QueryResult> {
+  try {
+    return await executeSql(connId, sql);
+  } catch (err) {
+    if (isSafetyConfirmationError(err)) {
+      const approved = await confirm(err as SafetyBlockedPayload);
+      if (approved) {
+        // SEC 决议: 原始 sql 字符串原样重发, 前端不得改写
+        return await executeSql(connId, sql, true);
+      }
+    }
+    throw err;
+  }
 }
 
 /**

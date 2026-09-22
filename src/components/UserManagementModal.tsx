@@ -291,7 +291,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     const pwdSql = newPassword ? `PASSWORD '${newPassword}'` : '';
     const sql = `CREATE ROLE "${newUsername}" WITH LOGIN ${superSql} ${pwdSql};`;
     try {
-      await executeSql(connId, sql);
+      await executeSql(connId, sql, true); // WP1: CREATE ROLE 走 UI 自有确认流, force 豁免 Critical 弹框
       setShowAddUserModal(false);
       await reloadUsers();
     } catch (err: any) {
@@ -302,7 +302,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   const handleDeleteUser = async (uname: string) => {
     if (!confirm(`确定要注销并删除数据库用户 "${uname}" 吗？`)) return;
     try {
-      await executeSql(connId, `DROP ROLE IF EXISTS "${uname}";`);
+      await executeSql(connId, `DROP ROLE IF EXISTS "${uname}";`, true); // WP1: 上方已有 confirm()
       await reloadUsers();
     } catch (err: any) {
       alert(`删除用户失败: ${err.message || String(err)}`);
@@ -437,7 +437,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     
     for (const stmt of sqlStatements) {
       try {
-        await executeSql(connId, stmt);
+        await executeSql(connId, stmt, true); // WP1: ACL 变更已经过矩阵 UI 用户确认
       } catch (e: any) {
         console.error('SQL Execution Failed:', stmt, e);
         errors.push(`• ${stmt}\n  原因: ${e.message || String(e)}`);
@@ -508,7 +508,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     if (!resetPwdUser || !resetPassword) return;
     try {
       const sql = `ALTER ROLE "${resetPwdUser}" WITH PASSWORD '${resetPassword}';`;
-      await executeSql(connId, sql);
+      await executeSql(connId, sql, true); // WP1: UI 弹窗即用户确认
       alert(`✅ 用户 "${resetPwdUser}" 密码重置成功！`);
       setResetPwdUser(null);
       setResetPassword('');

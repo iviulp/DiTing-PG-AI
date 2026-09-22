@@ -1,6 +1,14 @@
 import { create } from 'zustand';
-import { ConnectionConfig, QueryResult, AiConfig } from '../types';
-import { connectDb, executeSql, aiChat, updateAiConfig, getAiConfig } from '../services/ipc';
+import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
+import { connectDb, executeSqlWithGuard, aiChat, updateAiConfig, getAiConfig } from '../services/ipc';
+
+/** WP1: 待确认的 Critical SQL (全局确认对话框状态) */
+export interface PendingSafetyConfirm {
+  connId: string;
+  sql: string;
+  payload: SafetyBlockedPayload;
+  resolve: (approved: boolean) => void;
+}
 
 interface AppState {
   connections: ConnectionConfig[];
@@ -10,6 +18,8 @@ interface AppState {
   aiConfig: AiConfig;
   isExecuting: boolean;
   errorMsg: string | null;
+  /** WP1: 当前等待用户确认的高危 SQL (null = 无) */
+  pendingSafetyConfirm: PendingSafetyConfirm | null;
 
   // Actions
   addConnection: (config: ConnectionConfig) => Promise<void>;
@@ -20,6 +30,8 @@ interface AppState {
   setAiConfig: (config: AiConfig) => Promise<void>;
   loadAiConfig: () => Promise<void>;
   askAi: (prompt: string, schemaContext?: string) => Promise<string>;
+  /** WP1: 用户在全局确认框做出选择 */
+  resolveSafetyConfirm: (approved: boolean) => void;
 }
 
 
@@ -42,6 +54,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   isExecuting: false,
   errorMsg: null,
+  pendingSafetyConfirm: null,
 
   addConnection: async (config) => {
     try {
@@ -111,10 +124,23 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     set({ isExecuting: true, errorMsg: null });
     try {
-      const res = await executeSql(activeConnId, sql);
+      // WP1: Critical SQL 弹全局确认框, 用户批准后 force 重发 (安全判定以后端为准)
+      const res = await executeSqlWithGuard(activeConnId, sql, (payload) => {
+        return new Promise<boolean>((resolve) => {
+          set({ pendingSafetyConfirm: { connId: activeConnId, sql, payload, resolve } });
+        });
+      });
       set({ queryResult: res, isExecuting: false });
     } catch (err: any) {
       set({ errorMsg: err.message || String(err), isExecuting: false });
+    }
+  },
+
+  resolveSafetyConfirm: (approved) => {
+    const pending = get().pendingSafetyConfirm;
+    if (pending) {
+      set({ pendingSafetyConfirm: null });
+      pending.resolve(approved);
     }
   },
 

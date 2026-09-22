@@ -36,14 +36,18 @@ pub async fn connect_db(
 }
 
 /// 执行 SQL 查询并返回强类型数据集
+/// WP1: force=true 表示用户已确认 Critical 风险 (二次确认后重发), 仅豁免确认策略, 不豁免 read_only
 #[tauri::command]
 pub async fn execute_sql(
     conn_id: String,
     sql: String,
+    force: Option<bool>,
     db_service: State<'_, DbService>,
 ) -> Result<QueryResult, AppError> {
-    tracing::info!(target: "IPC::CMD", conn_id = %conn_id, "Received execute_sql IPC command");
-    db_service.execute_query(&conn_id, &sql).await
+    tracing::info!(target: "IPC::CMD", conn_id = %conn_id, force = force.unwrap_or(false), "Received execute_sql IPC command");
+    db_service
+        .execute_query(&conn_id, &sql, force.unwrap_or(false))
+        .await
 }
 
 /// 获取指定连接的表与视图 Schema 结构
@@ -54,7 +58,8 @@ pub async fn get_table_schema(
 ) -> Result<Vec<SchemaItemDto>, AppError> {
     tracing::info!(target: "IPC::CMD", conn_id = %conn_id, "Fetching table schema tree");
     let sql = "SELECT table_name, table_type, table_schema FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_name;";
-    let query_res = db_service.execute_query(&conn_id, sql).await?;
+    // 内部生成的可信只读 SQL, force=true 跳过确认策略
+    let query_res = db_service.execute_query(&conn_id, sql, true).await?;
 
     let mut items = Vec::new();
     for r in query_res.rows {
@@ -94,7 +99,7 @@ pub async fn get_process_list(
 ) -> Result<Vec<ProcessItemDto>, AppError> {
     tracing::info!(target: "IPC::CMD", conn_id = %conn_id, "Fetching active process list");
     let sql = "SELECT pid, usename, datname, client_addr, query, state, FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - query_start)))::INT8 FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();";
-    let res = db_service.execute_query(&conn_id, sql).await;
+    let res = db_service.execute_query(&conn_id, sql, true).await;
 
     match res {
         Ok(query_res) => {
@@ -175,7 +180,7 @@ pub async fn get_db_users(
 
     // 1. 尝试执行 PostgreSQL 系统的 pg_roles / pg_user / pg_authid
     let pg_sql = "SELECT r.rolname::text AS usename, CASE WHEN r.rolsuper THEN 'true' ELSE 'false' END AS usesuper, CASE WHEN r.rolcreatedb THEN 'true' ELSE 'false' END AS usecreatedb, r.rolvaliduntil::text, CASE WHEN r.rolname = current_user THEN 'true' ELSE 'false' END AS is_curr, CASE WHEN r.rolcreaterole OR r.rolsuper THEN 'true' ELSE 'false' END AS is_mgr FROM pg_roles r ORDER BY is_curr DESC, r.rolname ASC;";
-    let res = db_service.execute_query(&conn_id, pg_sql).await;
+    let res = db_service.execute_query(&conn_id, pg_sql, true).await;
 
     if let Ok(query_res) = res {
         if !query_res.rows.is_empty() {
@@ -230,7 +235,7 @@ pub async fn get_db_users(
 
     // 2. 尝试执行 MySQL 系统的 mysql.user
     let mysql_sql = "SELECT User, Super_priv = 'Y', Create_priv = 'Y', NULL, (User = SUBSTRING_INDEX(CURRENT_USER(), '@', 1)) AS is_curr, (Grant_priv = 'Y' OR Super_priv = 'Y') AS is_mgr FROM mysql.user GROUP BY User ORDER BY is_curr DESC, User ASC;";
-    if let Ok(mysql_res) = db_service.execute_query(&conn_id, mysql_sql).await {
+    if let Ok(mysql_res) = db_service.execute_query(&conn_id, mysql_sql, true).await {
         if !mysql_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in mysql_res.rows {
@@ -278,7 +283,7 @@ pub async fn get_db_users(
 
     // 3. 普通受限账户或特定权限视角：查询 pg_user 视图
     let pg_user_sql = "SELECT usename::text, usesuper, usecreatedb, valuntil::text, (usename = current_user()) AS is_curr FROM pg_user ORDER BY is_curr DESC, usename ASC;";
-    if let Ok(pu_res) = db_service.execute_query(&conn_id, pg_user_sql).await {
+    if let Ok(pu_res) = db_service.execute_query(&conn_id, pg_user_sql, true).await {
         if !pu_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in pu_res.rows {
@@ -321,7 +326,7 @@ pub async fn get_db_users(
     }
     // 4. 普通受限账户（未开全局读系统表，但被 GRANT 特权）
     let curr_sql = "SELECT current_user, pg_has_role(current_user, 'pg_read_all_stats', 'member') AS is_granted;";
-    if let Ok(curr_res) = db_service.execute_query(&conn_id, curr_sql).await {
+    if let Ok(curr_res) = db_service.execute_query(&conn_id, curr_sql, true).await {
         if let Some(r) = curr_res.rows.get(0) {
             let username = if let Some(DbValue::Text(v)) = r.get(0) {
                 v.clone()
@@ -360,7 +365,7 @@ pub async fn kill_process(
 ) -> Result<(), AppError> {
     tracing::info!(target: "IPC::CMD", conn_id = %conn_id, pid = %pid, "Killing active process session");
     let sql = format!("SELECT pg_terminate_backend({});", pid);
-    let _ = db_service.execute_query(&conn_id, &sql).await;
+    let _ = db_service.execute_query(&conn_id, &sql, true).await;
     Ok(())
 }
 

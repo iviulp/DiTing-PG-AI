@@ -238,6 +238,7 @@ PostgreSQL Data Type & Case Sensitivity Rules:
 
       if (extractedSql) {
         const cleanSql = extractedSql.trim().toLowerCase();
+        // 注意: 此白名单仅为体验层快捷判断, 安全判定以后端 AST 管道为准 (WP1)
         if (
           cleanSql.startsWith('update') ||
           cleanSql.startsWith('delete') ||

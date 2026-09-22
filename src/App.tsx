@@ -13,10 +13,11 @@ import { ExportWizardModal } from './components/ExportWizardModal';
 import { UserManagementModal } from './components/UserManagementModal';
 import { SavedSqlModal } from './components/SavedSqlModal';
 import { CliConsoleModal } from './components/CliConsoleModal';
+import { SafetyConfirmDialog } from './components/SafetyConfirmDialog';
 
 
 import { ConnectionConfig } from './types';
-import { connectDb, executeSql } from './services/ipc';
+import { connectDb, executeSql, executeSqlWithGuard } from './services/ipc';
 import {
   Database,
   Play,
@@ -51,7 +52,9 @@ export const App: React.FC = () => {
     errorMsg,
     loadAiConfig,
     aiConfig,
-    setAiConfig
+    setAiConfig,
+    pendingSafetyConfirm,
+    resolveSafetyConfirm
   } = useAppStore();
 
   const [inWorkspace, setInWorkspace] = useState(false);
@@ -162,6 +165,14 @@ export const App: React.FC = () => {
     }
     if (!activeConnId) return;
 
+    // WP1: Critical 高危 SQL 通过全局确认框征得用户批准 (安全判定以后端为准)
+    const confirmCritical = (payload: import('./types').SafetyBlockedPayload) =>
+      new Promise<boolean>((resolve) => {
+        useAppStore.setState({
+          pendingSafetyConfirm: { connId: activeConnId, sql: cleanSql, payload, resolve }
+        });
+      });
+
     // 按分号 split 解析出多条独立的有效 SQL 语句
     const sqlStatements = cleanSql
       .split(';')
@@ -171,7 +182,7 @@ export const App: React.FC = () => {
     if (sqlStatements.length === 0) return;
 
     if (sqlStatements.length === 1) {
-      // 只有一条语句：按单查询流程执行并直接刷新主 DataGrid
+      // 只有一条语句：按单查询流程执行并直接刷新主 DataGrid (runQuery 内部已带 guard)
       setResultTabs([]);
       setActiveResultTabId('');
       runQuery(sqlStatements[0]);
@@ -187,7 +198,7 @@ export const App: React.FC = () => {
         const titleName = fromMatch ? fromMatch[1] : `Query #${i + 1}`;
 
         try {
-          const res = await executeSql(activeConnId, stmt);
+          const res = await executeSqlWithGuard(activeConnId, stmt, confirmCritical);
           newTabs.push({
             id: `tab_${i}_${Date.now()}`,
             title: titleName,
@@ -902,6 +913,18 @@ export const App: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* WP1: 全局 Critical 高危 SQL 二次确认对话框 */}
+      {pendingSafetyConfirm && (
+        <SafetyConfirmDialog
+          payload={pendingSafetyConfirm.payload}
+          sql={pendingSafetyConfirm.sql}
+          connName={connections.find((c) => c.id === pendingSafetyConfirm.connId)?.name}
+          envTag={connections.find((c) => c.id === pendingSafetyConfirm.connId)?.env_tag}
+          onApprove={() => resolveSafetyConfirm(true)}
+          onReject={() => resolveSafetyConfirm(false)}
+        />
       )}
     </div>
   );

@@ -107,6 +107,18 @@ export interface AiConfig {
   temperature: number;
 }
 
+/** WP1: SQL 风险等级 (与后端 RiskLevel serde 小写对齐) */
+export type RiskLevel = 'safe' | 'warning' | 'critical';
+
+/** WP1: Tauri invoke reject 时后端 AppErrorDto 的结构化安全载荷 */
+export interface SafetyBlockedPayload {
+  code: string;
+  message: string;
+  risk_level?: RiskLevel;
+  requires_confirmation?: boolean;
+  reasons?: string[];
+}
+
 export interface SavedSqlSnippet {
   id: string;
   conn_id: string;

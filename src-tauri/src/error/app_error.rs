@@ -27,6 +27,15 @@ pub enum AppError {
     #[error("SQL Safety Check Blocked: {0}")]
     SafetyBlocked(String),
 
+    /// Critical 级高危 SQL 需用户二次确认 (WP1: 结构化风险信息随 DTO 下发前端)
+    #[error("{message}")]
+    SafetyCritical {
+        message: String,
+        risk_level: String,
+        requires_confirmation: bool,
+        reasons: Vec<String>,
+    },
+
     /// IO、文件或配置解析错误
     #[error("IO/System error: {0}")]
     Io(String),
@@ -45,6 +54,13 @@ pub enum AppError {
 pub struct AppErrorDto {
     pub code: String,
     pub message: String,
+    /// WP1: Critical 级风险信息 (仅 SAFETY_BLOCKED 且需确认时下发)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_confirmation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasons: Option<Vec<String>>,
 }
 
 impl AppError {
@@ -54,30 +70,63 @@ impl AppError {
             AppError::Database(msg) => AppErrorDto {
                 code: "DATABASE_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::Auth(msg) => AppErrorDto {
                 code: "AUTH_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::Ai(msg) => AppErrorDto {
                 code: "AI_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::SafetyBlocked(msg) => AppErrorDto {
                 code: "SAFETY_BLOCKED".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
+            },
+            AppError::SafetyCritical {
+                message,
+                risk_level,
+                requires_confirmation,
+                reasons,
+            } => AppErrorDto {
+                code: "SAFETY_BLOCKED".into(),
+                message: message.clone(),
+                risk_level: Some(risk_level.clone()),
+                requires_confirmation: Some(*requires_confirmation),
+                reasons: Some(reasons.clone()),
             },
             AppError::Io(msg) => AppErrorDto {
                 code: "IO_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::ConnectionNotFound(msg) => AppErrorDto {
                 code: "CONN_NOT_FOUND".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::Internal(msg) => AppErrorDto {
                 code: "INTERNAL_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
         }
     }

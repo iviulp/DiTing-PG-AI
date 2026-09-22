@@ -3,6 +3,7 @@
 
 use crate::error::AppError;
 use crate::models::{ColumnMetadata, ConnectionConfig, DatabaseType, DbValue, QueryResult};
+use crate::services::safety_checker::{RiskLevel, SqlSafetyChecker};
 
 use sqlx::{Column, Row, TypeInfo};
 use sqlx::postgres::PgPoolOptions;
@@ -154,27 +155,67 @@ impl DbService {
 
 
     /// 执行任意 SQL 语句并格式化返回 QueryResult
-    pub async fn execute_query(&self, conn_id: &str, sql: &str) -> Result<QueryResult, AppError> {
+    /// WP1 安全管道: psql 元命令先转译 → read_only AST 白名单 → 风险分级 (Critical 需 force 确认) → 执行
+    pub async fn execute_query(
+        &self,
+        conn_id: &str,
+        sql: &str,
+        force: bool,
+    ) -> Result<QueryResult, AppError> {
         let start = std::time::Instant::now();
         let lock = self.pools.read().await;
         let (pool, config) = lock
             .get(conn_id)
             .ok_or_else(|| AppError::ConnectionNotFound(conn_id.to_string()))?;
 
-        // 安全检核：若是物理只读模式，阻断写 SQL
-        if config.read_only {
-            let lower_sql = sql.trim().to_lowercase();
-            if lower_sql.starts_with("insert") || lower_sql.starts_with("update") || lower_sql.starts_with("delete") || lower_sql.starts_with("drop") {
-                return Err(AppError::SafetyBlocked("Database connection is in Read-Only mode.".into()));
-            }
-        }
-
-        // psql 元命令 (Meta-Commands) 智能解析与转译
+        // psql 元命令 (Meta-Commands) 智能解析与转译 (先转译, 再对 effective_sql 做 AST 检查)
         let effective_sql = if sql.trim().starts_with('\\') {
             Self::translate_psql_command(sql.trim(), &config.database)
         } else {
             sql.to_string()
         };
+
+        // L1: read_only 物理约束 — AST 白名单拦截 (force 也不可绕过)
+        if config.read_only {
+            SqlSafetyChecker::check_read_only(&effective_sql, &config.db_type)?;
+        }
+
+        // L2: 风险分级 — 解析失败时非 read_only 模式透传, 交由数据库本身报语法错
+        match SqlSafetyChecker::inspect_safety(&effective_sql, &config.db_type) {
+            Ok(verdict) => {
+                if verdict.level == RiskLevel::Critical && !force {
+                    return Err(AppError::SafetyCritical {
+                        message: format!(
+                            "高危 SQL 已被安全管道拦截: {}",
+                            verdict.reasons.join("; ")
+                        ),
+                        risk_level: verdict.level.as_str().to_string(),
+                        requires_confirmation: true,
+                        reasons: verdict.reasons,
+                    });
+                }
+                if verdict.level == RiskLevel::Critical && force {
+                    // SEC 决议: force=true 执行 Critical 时打 WARN 安全日志 (SQL 截断 200 字符脱敏)
+                    let truncated: String = effective_sql.chars().take(200).collect();
+                    tracing::warn!(
+                        target: "DB::SAFETY",
+                        conn_id = %conn_id,
+                        force = true,
+                        sql_head = %truncated,
+                        "Critical SQL force-executed after user confirmation"
+                    );
+                }
+            }
+            Err(_) if config.read_only => {
+                // read_only 下解析失败已在 L1 拦截, 不会到达此处; 防御性兜底
+                return Err(AppError::SafetyBlocked(
+                    "Read-Only mode: SQL 解析失败, 已拦截".into(),
+                ));
+            }
+            Err(_) => {
+                // 非 read_only: 语法解析失败透传, 让数据库报原始错误
+            }
+        }
 
         match pool {
             AnyPool::Postgres(p) => {
@@ -269,7 +310,7 @@ impl DbService {
             AnyPool::MySql(p) => {
                 const MAX_QUERY_ROWS_LIMIT: usize = 50_000;
                 use futures_util::StreamExt;
-                let mut stream = sqlx::query(sql).fetch(p);
+                let mut stream = sqlx::query(&effective_sql).fetch(p);
 
                 let mut rows_fetched = 0;
                 let mut columns: Vec<ColumnMetadata> = Vec::new();
@@ -316,7 +357,7 @@ impl DbService {
             AnyPool::Sqlite(p) => {
                 const MAX_QUERY_ROWS_LIMIT: usize = 50_000;
                 use futures_util::StreamExt;
-                let mut stream = sqlx::query(sql).fetch(p);
+                let mut stream = sqlx::query(&effective_sql).fetch(p);
 
                 let mut rows_fetched = 0;
                 let mut columns: Vec<ColumnMetadata> = Vec::new();
