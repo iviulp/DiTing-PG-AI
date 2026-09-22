@@ -1,6 +1,7 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
+import { escapeSqlLiteral } from '../utils/sqlEscape';
 
 /**
  * 建立与注册数据库连接
@@ -140,15 +141,27 @@ export async function getTableSchema(connId: string): Promise<any[]> {
   return await invoke('get_table_schema', { connId });
 }
 
-export async function getTableColumnsMetaData(connId: string, tableName: string): Promise<any[]> {
+/**
+ * WP4 步骤4: 取表列元数据 (含注释)。
+ * - schema 参数化 (默认 public), 支持多 schema 同名表
+ * - WHERE 两个条件值过 escapeSqlLiteral (消除 tableName 注入面)
+ * - col_description 改用 format('%I.%I', ...)::regclass (原 %s.%s 不加引号, 特殊标识符会解析错)
+ */
+export async function getTableColumnsMetaData(
+  connId: string,
+  tableName: string,
+  schemaName: string = 'public'
+): Promise<any[]> {
+  const safeTable = escapeSqlLiteral(tableName);
+  const safeSchema = escapeSqlLiteral(schemaName);
   const sql = `
     SELECT 
       c.column_name, 
       c.data_type, 
       c.is_nullable,
-      pg_catalog.col_description(format('%s.%s', c.table_schema, c.table_name)::regclass::oid, c.ordinal_position) as column_comment
+      pg_catalog.col_description(format('%I.%I', c.table_schema, c.table_name)::regclass::oid, c.ordinal_position) as column_comment
     FROM information_schema.columns c
-    WHERE c.table_schema = 'public' AND c.table_name = '${tableName}'
+    WHERE c.table_schema = '${safeSchema}' AND c.table_name = '${safeTable}'
     ORDER BY c.ordinal_position;
   `;
   try {

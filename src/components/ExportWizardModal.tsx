@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { QueryResult } from '../types';
 import { executeSql, openDownloadsFolder, selectSaveDir, saveFileDirectly } from '../services/ipc';
+import { sanitizeIdentifier } from '../utils/sqlEscape';
 import { Download, Activity, Layout, Terminal, CheckCircle2, Layers, FolderOpen, ExternalLink, Sparkles, Database, FileSpreadsheet, Folder } from 'lucide-react';
 
 
@@ -123,7 +124,8 @@ export const ExportWizardModal: React.FC<ExportWizardModalProps> = ({
     // 若选择了全量导出整个表
     if (exportScope === 'all') {
       try {
-        const fullSql = `SELECT * FROM "${tableName || 'user'}";`;
+        // WP4 步骤5: 表名过 sanitizeIdentifier (防注入)
+        const fullSql = `SELECT * FROM "${sanitizeIdentifier(tableName || 'user')}";`;
         targetResult = await executeSql(connId, fullSql);
       } catch (err: any) {
         alert(`查询全表导出失败: ${err.message || String(err)}`);

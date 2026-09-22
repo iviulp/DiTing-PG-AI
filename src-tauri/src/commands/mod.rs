@@ -383,6 +383,13 @@ pub async fn kill_process(
     db_service: State<'_, DbService>,
 ) -> Result<(), AppError> {
     tracing::info!(target: "IPC::CMD", conn_id = %conn_id, pid = %pid, "Killing active process session");
+    // WP4 步骤6: pid 范围断言 — 拒绝负数/越界 (拼接保持 i64 类型安全, 但防御异常输入)
+    if pid <= 0 || pid > i32::MAX as i64 {
+        return Err(AppError::Internal(format!(
+            "非法 pid {pid}: 超出 PostgreSQL backend pid 有效范围 (1..={})",
+            i32::MAX
+        )));
+    }
     let sql = format!("SELECT pg_terminate_backend({});", pid);
     let _ = db_service.execute_query(&conn_id, &sql, true).await;
     Ok(())

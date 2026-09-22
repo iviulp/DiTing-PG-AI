@@ -96,7 +96,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
   useEffect(() => {
     if (selectedTable !== 'AUTO' && selectedTable !== 'NONE' && activeConnId) {
-      getTableColumnsMetaData(activeConnId, selectedTable)
+      // WP4 步骤4: 透传 schema (从表列表匹配, 缺省回退 public)
+      const schemaOf = tables.find((t) => t.name === selectedTable)?.schema_name || 'public';
+      getTableColumnsMetaData(activeConnId, selectedTable, schemaOf)
         .then((cols) => {
           setActiveTableColumns(
             cols.map((c) => ({
@@ -110,7 +112,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     } else {
       setActiveTableColumns([]);
     }
-  }, [selectedTable, activeConnId]);
+  }, [selectedTable, activeConnId, tables]);
 
   const classifyIntent = (userQuery: string): QueryIntent => {
     const q = userQuery.toLowerCase();
@@ -205,7 +207,7 @@ PostgreSQL Type Rules:
           try {
             const tableInfos = await Promise.all(
               targetTables.slice(0, 5).map(async (tbl) => {
-                const cols = await getTableColumnsMetaData(activeConnId, tbl.name);
+                const cols = await getTableColumnsMetaData(activeConnId, tbl.name, tbl.schema_name || 'public');
                 const colStr = cols.map((c) => `"${c.column_name}" (${c.data_type})`).join(', ');
                 return `Table "${tbl.name}": [${colStr}]`;
               })

@@ -21,6 +21,10 @@ pub enum AnyPool {
     Sqlite(sqlx::SqlitePool),
 }
 
+/// WP4 步骤2: 转义失败时返回的常量 Error SQL (不含用户原始输入, 避免反射注入/回显)
+const SELECT_ESCAPE_ERROR: &str =
+    "SELECT 'Invalid input: contains control characters' AS \"Error\";";
+
 /// 全局连接池调度服务
 pub struct DbService {
     pools: Arc<RwLock<HashMap<String, (AnyPool, ConnectionConfig)>>>,
@@ -59,14 +63,28 @@ impl DbService {
             }
             "\\c" | "\\connect" => {
                 if !arg.is_empty() {
-                    format!("SELECT current_database() AS \"Current_DB\", '{}' AS \"Target_DB_Tip (请使用顶部下拉切换)\", current_user AS \"User\";", arg)
+                    // WP4 步骤2: 目标库名过 escape_sql_literal; 失败返回常量 Error SQL (不回显输入)
+                    match crate::services::sql_escape::escape_sql_literal(arg) {
+                        Ok(safe) => format!(
+                            "SELECT current_database() AS \"Current_DB\", '{}' AS \"Target_DB_Tip (请使用顶部下拉切换)\", current_user AS \"User\";",
+                            safe
+                        ),
+                        Err(_) => SELECT_ESCAPE_ERROR.to_string(),
+                    }
                 } else {
                     "SELECT current_database() AS \"Current_DB\", current_user AS \"User\", inet_server_addr()::text AS \"Server_IP\", inet_server_port() AS \"Port\";".into()
                 }
             }
             "\\dt" => {
                 if !arg.is_empty() {
-                    format!("SELECT n.nspname as \"Schema\", c.relname as \"Name\", 'table' as \"Type\", pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\" FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relname ILIKE '%{}%' ORDER BY 1,2;", arg)
+                    // WP4 步骤2: 模式串过 escape_sql_literal (保留 ILIKE %通配语义, psql 兼容)
+                    match crate::services::sql_escape::escape_sql_literal(arg) {
+                        Ok(safe) => format!(
+                            "SELECT n.nspname as \"Schema\", c.relname as \"Name\", 'table' as \"Type\", pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\" FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relname ILIKE '%{}%' ORDER BY 1,2;",
+                            safe
+                        ),
+                        Err(_) => SELECT_ESCAPE_ERROR.to_string(),
+                    }
                 } else {
                     "SELECT n.nspname as \"Schema\", c.relname as \"Name\", 'table' as \"Type\", pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\" FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1,2;".into()
                 }
@@ -88,9 +106,26 @@ impl DbService {
             }
             "\\d" => {
                 if !arg.is_empty() {
-                    let clean_tbl = arg.replace('"', "");
-                    format!(
-                        "SELECT \
+                    // WP4 步骤2: 删除原 arg.replace('"', "") 伪清洗; 全量过 escape_sql_literal
+                    // 支持 schema.table (按最后一个 '.' 切分, 双条件各自转义)
+                    let (schema_part, table_part) = match arg.rfind('.') {
+                        Some(idx) if idx > 0 && idx < arg.len() - 1 => {
+                            (Some(&arg[..idx]), &arg[idx + 1..])
+                        }
+                        _ => (None, arg),
+                    };
+                    let esc = crate::services::sql_escape::escape_sql_literal;
+                    match (
+                        schema_part.map(esc).transpose(),
+                        esc(table_part),
+                    ) {
+                        (Ok(schema), Ok(table)) => {
+                            let schema_cond = match schema {
+                                Some(s) => format!(" AND n.nspname = '{}'", s),
+                                None => String::new(),
+                            };
+                            format!(
+                                "SELECT \
                             a.attname AS \"Column\", \
                             format_type(a.atttypid, a.atttypmod) AS \"Type\", \
                             CASE WHEN a.attnotnull THEN 'not null' ELSE '' END AS \"Nullable\", \
@@ -99,10 +134,13 @@ impl DbService {
                          FROM pg_catalog.pg_attribute a \
                          JOIN pg_catalog.pg_class c ON a.attrelid = c.oid \
                          JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid \
-                         WHERE c.relname = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+                         WHERE c.relname = '{}'{} AND a.attnum > 0 AND NOT a.attisdropped \
                          ORDER BY a.attnum;",
-                        clean_tbl
-                    )
+                                table, schema_cond
+                            )
+                        }
+                        _ => SELECT_ESCAPE_ERROR.to_string(),
+                    }
                 } else {
                     "SELECT n.nspname as \"Schema\", c.relname as \"Name\", CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 's' THEN 'special' WHEN 'f' THEN 'foreign table' END as \"Type\", pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\" FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1,2;".into()
                 }
@@ -165,6 +203,20 @@ impl DbService {
                         }
                         AppError::Database(e.to_string())
                     })?;
+                // WP4 步骤2: standard_conforming_strings 基线检查 (off 时反斜杠有转义语义, 告警)
+                {
+                    use sqlx::Row;
+                    if let Ok(row) = sqlx::query("SHOW standard_conforming_strings")
+                        .fetch_one(&p)
+                        .await
+                    {
+                        let v: String = row.try_get(0).unwrap_or_default();
+                        if v.eq_ignore_ascii_case("off") {
+                            tracing::warn!(target: "DB::SECURITY", conn_id = %conn_id,
+                                "standard_conforming_strings=off — 反斜杠在字面量中有转义语义, SQL 拼接安全假设被削弱!");
+                        }
+                    }
+                }
                 AnyPool::Postgres(p)
             }
             DatabaseType::Mysql => {
@@ -460,5 +512,115 @@ impl DbService {
         }
 
 
+    }
+}
+
+// ============ WP4 步骤2: translate_psql_command 注入加固集成测试 (T2) ============
+
+#[cfg(test)]
+mod tests_wp4_translate {
+    use super::DbService;
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    /// 断言 SQL 为单条语句且可被 sqlparser 解析 (无多语句注入)
+    fn assert_single_select(sql: &str) {
+        let dialect = PostgreSqlDialect {};
+        let ast = Parser::parse_sql(&dialect, sql)
+            .unwrap_or_else(|e| panic!("SQL 应可解析为合法语句, 实得错误 {e}; SQL={sql}"));
+        assert_eq!(ast.len(), 1, "必须是单条语句, 防多语句注入; SQL={sql}");
+        let s = ast[0].to_string().to_uppercase();
+        assert!(s.starts_with("SELECT"), "必须是 SELECT; SQL={sql}");
+    }
+
+    #[test]
+    fn t2_dt_pattern_escapes_single_quote() {
+        // \dt it's → ILIKE '%it''s%'
+        let sql = DbService::translate_psql_command("\\dt it's", "mydb");
+        assert!(sql.contains("ILIKE '%it''s%'"), "单引号应翻倍: {sql}");
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_dt_wildcard_preserved() {
+        // \dt user% → 通配符保留 (psql 兼容)
+        let sql = DbService::translate_psql_command("\\dt user%", "mydb");
+        assert!(sql.contains("ILIKE '%user%%'"), "通配符应保留: {sql}");
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_d_injection_attempt_neutralized() {
+        // 注意: translate 按空白切分, arg 仅取第二个 token "evil';", 其余被丢弃 (天然限制注入面)
+        // 关键保证: 该 token 的单引号被翻倍, 整条 SQL 是单条 SELECT
+        let sql = DbService::translate_psql_command("\\d evil'; DROP TABLE t; --", "mydb");
+        assert!(
+            sql.contains("relname = 'evil'';'"),
+            "注入 token 的单引号应翻倍: {sql}"
+        );
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_d_injection_no_space_neutralized() {
+        // 无空格注入 (整体作为单 token): \d x';DROPTABLEy;--
+        let sql = DbService::translate_psql_command("\\d x';DROPTABLEy;--", "mydb");
+        assert!(
+            sql.contains("relname = 'x'';DROPTABLEy;--'"),
+            "无空格注入也应被字面量化: {sql}"
+        );
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_d_control_char_returns_constant_error() {
+        // \d bad\0name → 常量 Error SQL, 不含原始输入
+        let sql = DbService::translate_psql_command("\\d bad\u{0}name", "mydb");
+        assert_eq!(sql, "SELECT 'Invalid input: contains control characters' AS \"Error\";");
+        assert!(!sql.contains("bad"), "不得回显原始输入");
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_d_schema_table_split() {
+        // \d myschema.mytable → 双条件 nspname/relname
+        let sql = DbService::translate_psql_command("\\d myschema.mytable", "mydb");
+        assert!(sql.contains("c.relname = 'mytable'"), "表名条件: {sql}");
+        assert!(sql.contains("n.nspname = 'myschema'"), "schema 条件: {sql}");
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_d_schema_table_injection() {
+        // schema.table 两段各自转义
+        let sql = DbService::translate_psql_command("\\d sch'ema.tab'le", "mydb");
+        assert!(sql.contains("n.nspname = 'sch''ema'"), "schema 段转义: {sql}");
+        assert!(sql.contains("c.relname = 'tab''le'"), "表名段转义: {sql}");
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_c_database_escapes_quote() {
+        // \c db'x → 'db''x'
+        let sql = DbService::translate_psql_command("\\c db'x", "mydb");
+        assert!(sql.contains("'db''x'"), "目标库名单引号应翻倍: {sql}");
+        assert_single_select(&sql);
+    }
+
+    #[test]
+    fn t2_no_arg_commands_unchanged() {
+        // 无参常量路径零回归: \dt \d \l \dn \du \df \di \dv 均为合法单 SELECT
+        for cmd in ["\\dt", "\\d", "\\l", "\\dn", "\\du", "\\df", "\\di", "\\dv"] {
+            let sql = DbService::translate_psql_command(cmd, "mydb");
+            assert_single_select(&sql);
+        }
+    }
+
+    #[test]
+    fn t2_d_no_arg_lists_all_relations() {
+        // \d 无参 → 列出全部关系 (常量路径)
+        let sql = DbService::translate_psql_command("\\d", "mydb");
+        assert!(sql.contains("CASE c.relkind"), "无参 \\d 应走关系列举分支: {sql}");
+        assert_single_select(&sql);
     }
 }

@@ -20,6 +20,11 @@ import { ConnectionConfig } from './types';
 import { connectDb, executeSql, executeSqlWithGuard, onTunnelDisconnected } from './services/ipc';
 import { mapTunnelError } from './utils/tunnelError';
 import {
+  quoteIdentifier,
+  sanitizeIdentifier,
+  escapeSqlLiteral
+} from './utils/sqlEscape';
+import {
   Database,
   Play,
   Settings,
@@ -580,8 +585,12 @@ export const App: React.FC = () => {
               selectedTable={designerTable}
               onSelectTable={(tbl) => {
                 setDesignerTable(tbl);
-                setSqlText(`SELECT * FROM "${tbl}" LIMIT 100;`);
-                runQuery(`SELECT * FROM "${tbl}" LIMIT 100;`);
+                // WP4 步骤5: 表名过 quoteIdentifier; schema.table 形式分段引用
+                const q = tbl.includes('.')
+                  ? tbl.split('.').map((seg) => quoteIdentifier(seg)).join('.')
+                  : quoteIdentifier(tbl);
+                setSqlText(`SELECT * FROM ${q} LIMIT 100;`);
+                runQuery(`SELECT * FROM ${q} LIMIT 100;`);
               }}
               onDesignTable={(tbl) => {
                 setDesignerTable(tbl);
@@ -663,22 +672,31 @@ export const App: React.FC = () => {
                         return;
                       }
 
-                      // 安全脱敏辅助工具：转义表名/列名中的双引号，防止 SQL 注入
-                      const sanitizeIdentifier = (name: string) => name.replace(/"/g, '""');
-                      const escapeSqlString = (str: string) => str.replace(/'/g, "''");
-
-                      const cleanTable = sanitizeIdentifier(targetTable);
+                      // WP4 步骤5: 删除局部转义函数, 统一使用 src/utils/sqlEscape.ts (含控制字符拒绝)
+                      let cleanTable: string;
+                      try {
+                        cleanTable = sanitizeIdentifier(targetTable);
+                      } catch (e: any) {
+                        alert(`目标表名含非法字符, 无法生成回写 SQL: ${e.message || e}`);
+                        return;
+                      }
                       const cleanPkCol = sanitizeIdentifier(pkCol.name);
+                      // 值转义: 数字须为有限数 (排除 NaN/Infinity), 否则走字符串转义路径
+                      const sqlVal = (v: unknown): string =>
+                        typeof v === 'number' && Number.isFinite(v)
+                          ? String(v)
+                          : `'${escapeSqlLiteral(String(v))}'`;
 
                       const sqlStatements: string[] = [];
-
+                      // WP4 会议八 P1: 值含控制字符被 escapeSqlLiteral 拒绝时 → 提示且不丢编辑态
+                      try {
                       // 1. 处理删除行 (DELETE FROM "tbl" WHERE "id" = val)
                       deletedRowIndices.forEach((rIdx) => {
                         const row = queryResult.rows[rIdx];
                         if (row) {
                           const pkCell = row.find((_, cIdx) => queryResult.columns[cIdx]?.name === pkCol.name);
                           if (pkCell) {
-                            const val = typeof pkCell.val === 'number' ? pkCell.val : `'${escapeSqlString(String(pkCell.val))}'`;
+                            const val = sqlVal(pkCell.val);
                             sqlStatements.push(`DELETE FROM "${cleanTable}" WHERE "${cleanPkCol}" = ${val};`);
                           }
                         }
@@ -704,13 +722,13 @@ export const App: React.FC = () => {
                           const key = `${rIdx}_${col.name}`;
                           if (key in edits) {
                             const newVal = edits[key];
-                            const formattedVal = newVal === 'NULL' ? 'NULL' : `'${escapeSqlString(newVal)}'`;
+                            const formattedVal = newVal === 'NULL' ? 'NULL' : sqlVal(newVal);
                             setClauses.push(`"${sanitizeIdentifier(col.name)}" = ${formattedVal}`);
                           }
                         });
 
                         if (setClauses.length > 0) {
-                          const pkVal = typeof pkCell.val === 'number' ? pkCell.val : `'${escapeSqlString(String(pkCell.val))}'`;
+                          const pkVal = sqlVal(pkCell.val);
                           sqlStatements.push(`UPDATE "${cleanTable}" SET ${setClauses.join(', ')} WHERE "${cleanPkCol}" = ${pkVal};`);
                         }
                       });
@@ -722,13 +740,17 @@ export const App: React.FC = () => {
                         Object.entries(rowMap).forEach(([colName, val]) => {
                           if (val !== undefined && val !== '') {
                             cols.push(`"${sanitizeIdentifier(colName)}"`);
-                            vals.push(`'${escapeSqlString(val)}'`);
+                            vals.push(sqlVal(val));
                           }
                         });
                         if (cols.length > 0) {
                           sqlStatements.push(`INSERT INTO "${cleanTable}" (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
                         }
                       });
+                      } catch (e: any) {
+                        alert(`变更值含非法字符, 未生成回写 SQL (编辑内容已保留): ${e.message || e}`);
+                        return;
+                      }
 
                       if (sqlStatements.length > 0) {
                         try {
