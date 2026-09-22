@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ConnectionConfig } from '../types';
 import { Key, Plus, Edit3, Copy, Trash2, ShieldCheck, Sparkles, ChevronRight, Zap, Search, LayoutGrid, List, Download, Upload } from 'lucide-react';
-import { exportEncryptedBundle, importEncryptedBundle } from '../services/ipc';
+import { importEncryptedBundle, vaultExportBundle, vaultUpsertConnection } from '../services/ipc';
 import { useAppStore } from '../store/useAppStore';
 
 interface WelcomeScreenProps {
@@ -33,24 +33,62 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   const [enteringConn, setEnteringConn] = useState<ConnectionConfig | null>(null);
   const [isExportingVault, setIsExportingVault] = useState(false);
 
-  const { aiConfig, setAiConfig } = useAppStore();
+  const { setAiConfig } = useAppStore();
+
+  // ============ WP6-S7: 主密码弹窗状态 ============
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportPw, setExportPw] = useState('');
+  const [exportPwConfirm, setExportPwConfirm] = useState('');
+  const [exportError, setExportError] = useState<string | null>(null);
+  // 导入流: 文件内容暂存 (弹窗级, 关闭即清)
+  const [importFileText, setImportFileText] = useState<string | null>(null);
+  const [importIsLegacy, setImportIsLegacy] = useState(false);
+  const [importPw, setImportPw] = useState('');
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importFailCount, setImportFailCount] = useState(0);
+
+  const passwordStrength = (pw: string): { label: string; color: string; pct: number } => {
+    let score = 0;
+    if (pw.length >= 8) score += 1;
+    if (pw.length >= 12) score += 1;
+    if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score += 1;
+    if (/\d/.test(pw)) score += 1;
+    if (/[^A-Za-z0-9]/.test(pw)) score += 1;
+    if (score <= 1) return { label: '弱', color: 'bg-red-500', pct: 20 };
+    if (score <= 2) return { label: '较弱', color: 'bg-orange-500', pct: 40 };
+    if (score <= 3) return { label: '中', color: 'bg-yellow-500', pct: 60 };
+    if (score <= 4) return { label: '强', color: 'bg-lime-500', pct: 80 };
+    return { label: '很强', color: 'bg-emerald-500', pct: 100 };
+  };
+
+  const openExportDialog = () => {
+    setExportPw('');
+    setExportPwConfirm('');
+    setExportError(null);
+    setExportDialogOpen(true);
+  };
 
   const handleExportVault = async () => {
+    // ≥8 位硬拦截 (前端) + 后端二次校验
+    if (exportPw.length < 8) {
+      setExportError('主密码至少 8 位');
+      return;
+    }
+    if (exportPw !== exportPwConfirm) {
+      setExportError('两次输入的密码不一致');
+      return;
+    }
     setIsExportingVault(true);
+    setExportError(null);
     try {
-      const connsJson = JSON.stringify(connections);
-      const savedSqlRaw = localStorage.getItem('diting_saved_sql_snippets') || '[]';
-
-      // 备份包含：全量连接配置 + AI 参数 + 所有专属 SQL 脚本库
-      const combinedAiConfigWithSnippets = JSON.stringify({
-        ...aiConfig,
-        _saved_sql_snippets: JSON.parse(savedSqlRaw),
-      });
-
-      const savedPath = await exportEncryptedBundle(connsJson, combinedAiConfigWithSnippets);
-      alert(`🔐 全量配置已使用证书高强加密导出成功！\n\n文件保存路径：\n${savedPath}\n\n已加密包含：${connections.length} 个数据库连接配置 + AI Provider 密钥 + 所有已存 SQL 脚本库。`);
+      // WP6-S7: payload 由后端从 vault 组装 (真实密码不出 Rust 边界)
+      const savedPath = await vaultExportBundle(exportPw);
+      setExportDialogOpen(false);
+      setExportPw('');
+      setExportPwConfirm('');
+      alert(`🔐 全量配置已用主密码加密导出成功 (v2 格式)！\n\n文件保存路径：\n${savedPath}\n\n⚠️ 请牢记主密码：丢失后无法找回，备份文件将无法解密。`);
     } catch (err: any) {
-      alert(`❌ 导出加密配置失败：${err.message || String(err)}`);
+      setExportError(err.message || String(err));
     } finally {
       setIsExportingVault(false);
     }
@@ -61,8 +99,50 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
     if (!file) return;
     try {
       const text = await file.text();
-      const decrypted = await importEncryptedBundle(text);
+      // 探测版本: version>=2 → 主密码弹窗; 否则 legacy 风险告知
+      let version = 1;
+      try {
+        const meta = JSON.parse(text);
+        version = Number(meta.version) || 1;
+      } catch {
+        throw new Error('无效的备份文件格式，请确保上传的是 .ditingvault 加密文件');
+      }
+      setImportFileText(text);
+      setImportIsLegacy(version < 2);
+      setImportPw('');
+      setImportError(null);
+      setImportFailCount(0);
+    } catch (err: any) {
+      alert(`⛔ 导入失败：${err.message || String(err)}`);
+    } finally {
+      e.target.value = '';
+    }
+  };
 
+  const closeImportDialog = () => {
+    // 密码 state 弹窗级临时存储, 关闭即清
+    setImportFileText(null);
+    setImportPw('');
+    setImportError(null);
+  };
+
+  const submitImport = async () => {
+    if (!importFileText) return;
+    if (!importIsLegacy && importPw.length === 0) {
+      setImportError('请输入导出时设置的主密码');
+      return;
+    }
+    // 前端限速: 5 次失败后禁用提交 (后端另有 5次/30s 限速)
+    if (importFailCount >= 5) {
+      setImportError('密码错误次数过多, 请稍后再试');
+      return;
+    }
+    setImportError(null);
+    try {
+      const decrypted = await importEncryptedBundle(
+        importFileText,
+        importIsLegacy ? null : importPw
+      );
       if (!decrypted || typeof decrypted !== 'object') {
         throw new Error('解密后的数据格式非法');
       }
@@ -70,33 +150,42 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       const importedConns = decrypted.connections as ConnectionConfig[];
       const importedAi = decrypted.ai_config;
 
+      // WP6: 导入连接走 vault 加密落盘 (不再写 localStorage 明文)
+      let restored = 0;
       if (Array.isArray(importedConns) && importedConns.length > 0) {
-        // 合并去重导入数据库连接
-        const currentMap = new Map(connections.map((c) => [c.id, c]));
-        importedConns.forEach((c) => currentMap.set(c.id, c));
-        const mergedConns = Array.from(currentMap.values());
-        localStorage.setItem('aidb_connections', JSON.stringify(mergedConns));
-        useAppStore.setState({ connections: mergedConns });
+        for (const c of importedConns) {
+          await vaultUpsertConnection(c);
+          restored += 1;
+        }
+        await useAppStore.getState().refreshConnections();
       }
 
       if (importedAi && typeof importedAi === 'object') {
         const { _saved_sql_snippets, ...pureAiConfig } = importedAi;
         if (_saved_sql_snippets && Array.isArray(_saved_sql_snippets)) {
-          // 合并已存 SQL 脚本库
           const currentSqlRaw = localStorage.getItem('diting_saved_sql_snippets');
           const currentSqls = currentSqlRaw ? JSON.parse(currentSqlRaw) : [];
           const snippetMap = new Map(currentSqls.map((s: any) => [s.id, s]));
           _saved_sql_snippets.forEach((s: any) => snippetMap.set(s.id, s));
           localStorage.setItem('diting_saved_sql_snippets', JSON.stringify(Array.from(snippetMap.values())));
         }
-        await setAiConfig(pureAiConfig);
+        // api_key 为空/缺省时传 __KEEP__ 保留现有 key
+        const keyVal = typeof pureAiConfig.api_key === 'string' && pureAiConfig.api_key.length > 0
+          ? pureAiConfig.api_key
+          : '__KEEP__';
+        await setAiConfig({ ...pureAiConfig, api_key: keyVal });
       }
 
-      alert(`✅ 导入成功并已完成自动解密！\n\n已恢复 ${importedConns?.length || 0} 个数据库连接、AI 配置及绑定的已存 SQL 脚本库。`);
+      const wasLegacy = decrypted.legacy_import === true;
+      closeImportDialog();
+      if (wasLegacy) {
+        alert(`✅ 旧版 (v1) 备份导入成功，已恢复 ${restored} 个连接。\n\n⚠️ 安全提示：v1 格式使用已废弃的内置固定密钥，任何拿到旧备份文件的人都可解密。\n请立即点击「导出加密配置」设置主密码，以 v2 格式重新备份，并销毁旧文件。`);
+      } else {
+        alert(`✅ 导入成功并已完成自动解密！\n\n已恢复 ${restored} 个数据库连接与 AI 配置。`);
+      }
     } catch (err: any) {
-      alert(`⛔ 导入失败：${err.message || String(err)}`);
-    } finally {
-      e.target.value = '';
+      setImportFailCount((n) => n + 1);
+      setImportError(err.message || String(err));
     }
   };
 
@@ -354,10 +443,10 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
 
               {/* 导出加密备份 */}
               <button
-                onClick={handleExportVault}
+                onClick={openExportDialog}
                 disabled={isExportingVault}
                 className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow"
-                title="使用工业级证书密钥导出全量加密备份 (.ditingvault)"
+                title="设置主密码导出全量加密备份 (.ditingvault v2)"
               >
                 <Download className={`w-3.5 h-3.5 text-emerald-400 ${isExportingVault ? 'animate-bounce' : ''}`} />
                 <span>{isExportingVault ? '正在加密导出...' : '导出加密配置'}</span>
@@ -639,6 +728,133 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           <span>v2.0.0</span>
         </div>
       </div>
+
+      {/* ============ WP6-S7: 导出主密码弹窗 ============ */}
+      {exportDialogOpen && (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-[420px] bg-[#12151c] border border-slate-700 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center gap-2 mb-4">
+              <ShieldCheck className="w-5 h-5 text-emerald-400" />
+              <h3 className="text-sm font-bold text-slate-100">设置备份主密码</h3>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed mb-4">
+              导出备份将使用你设置的主密码加密 (AES-256-GCM)。
+              <span className="text-amber-400 font-bold"> 主密码无法找回</span>
+              ，丢失后备份文件将无法解密，请务必牢记。
+            </p>
+            <label className="block text-[11px] text-slate-500 mb-1">主密码 (至少 8 位)</label>
+            <input
+              type="password"
+              autoFocus
+              value={exportPw}
+              onChange={(e) => setExportPw(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-100 focus:border-emerald-500 outline-none"
+              placeholder="••••••••"
+            />
+            {exportPw.length > 0 && (
+              <div className="flex items-center gap-2 mt-2">
+                <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full ${passwordStrength(exportPw).color} transition-all`}
+                    style={{ width: `${passwordStrength(exportPw).pct}%` }}
+                  />
+                </div>
+                <span className="text-[10px] text-slate-400">
+                  强度: {passwordStrength(exportPw).label}
+                </span>
+              </div>
+            )}
+            <label className="block text-[11px] text-slate-500 mb-1 mt-3">确认主密码</label>
+            <input
+              type="password"
+              value={exportPwConfirm}
+              onChange={(e) => setExportPwConfirm(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleExportVault()}
+              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-100 focus:border-emerald-500 outline-none"
+              placeholder="••••••••"
+            />
+            {exportError && (
+              <p className="text-xs text-red-400 mt-2">⛔ {exportError}</p>
+            )}
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={() => setExportDialogOpen(false)}
+                className="px-4 py-2 text-xs text-slate-400 hover:text-slate-200 rounded-lg border border-slate-700"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleExportVault}
+                disabled={isExportingVault || exportPw.length < 8 || exportPw !== exportPwConfirm}
+                className="px-4 py-2 text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg"
+              >
+                {isExportingVault ? '正在加密导出...' : '加密导出'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============ WP6-S7: 导入主密码弹窗 (v2 / legacy 风险告知) ============ */}
+      {importFileText !== null && (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-[440px] bg-[#12151c] border border-slate-700 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center gap-2 mb-4">
+              <Key className="w-5 h-5 text-cyan-400" />
+              <h3 className="text-sm font-bold text-slate-100">
+                {importIsLegacy ? '导入旧版 (v1) 备份' : '输入备份主密码'}
+              </h3>
+            </div>
+            {importIsLegacy ? (
+              <div className="text-xs text-slate-300 leading-relaxed mb-4 bg-red-950/40 border border-red-800/50 rounded-lg p-3">
+                <p className="font-bold text-red-400 mb-1">⚠️ 检测到旧版 v1 格式备份</p>
+                <p>
+                  该文件使用已废弃的内置固定密钥加密，任何持有此文件的人都可解密其内容。
+                  导入成功后请立即用「导出加密配置」设置主密码重新备份为 v2 格式，并安全销毁旧文件。
+                </p>
+              </div>
+            ) : (
+              <>
+                <p className="text-xs text-slate-400 mb-3">
+                  此备份为 v2 格式，需要输入导出时设置的主密码才能解密。
+                </p>
+                <input
+                  type="password"
+                  autoFocus
+                  value={importPw}
+                  onChange={(e) => setImportPw(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && submitImport()}
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-100 focus:border-cyan-500 outline-none"
+                  placeholder="主密码"
+                />
+              </>
+            )}
+            {importError && (
+              <p className="text-xs text-red-400 mt-2">⛔ {importError}</p>
+            )}
+            {importFailCount > 0 && importFailCount < 5 && (
+              <p className="text-[10px] text-slate-500 mt-1">
+                已失败 {importFailCount}/5 次，达到上限后需等待冷却
+              </p>
+            )}
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={closeImportDialog}
+                className="px-4 py-2 text-xs text-slate-400 hover:text-slate-200 rounded-lg border border-slate-700"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitImport}
+                disabled={(!importIsLegacy && importPw.length === 0) || importFailCount >= 5}
+                className="px-4 py-2 text-xs font-bold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg"
+              >
+                {importIsLegacy ? '我已知晓风险, 导入' : '解密导入'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

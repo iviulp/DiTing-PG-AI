@@ -63,6 +63,11 @@ pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
     pub db_type: DatabaseType,
+    /// WP6: 前端分组/颜色标签 (serde default 兼容旧数据)
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default)]
+    pub color_label: Option<String>,
     pub host: String,
     pub port: u16,
     pub user: String,

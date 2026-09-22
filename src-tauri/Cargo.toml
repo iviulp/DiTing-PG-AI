@@ -5,10 +5,6 @@ description = "AIDB Desk - AI-Powered Database Client"
 authors = ["AIDB Dev Team"]
 edition = "2021"
 
-[lib]
-name = "aidb_desk_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -44,6 +40,9 @@ argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
 zeroize = { version = "1.8", features = ["derive"] }
+hkdf = "0.12"
+sha2 = "0.10"
+keyring = { version = "3", features = ["apple-native"] }
 secrecy = "0.8"
 
 # SQL Parsing & Safety AST Inspector

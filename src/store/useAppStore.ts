@@ -1,13 +1,17 @@
 import { create } from 'zustand';
 import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
 import {
-  connectDb,
   executeSqlWithGuard,
   aiChat,
   aiChatStream,
   ChatMessage,
   updateAiConfig,
-  getAiConfig
+  getAiConfig,
+  vaultListConnections,
+  vaultUpsertConnection,
+  vaultDeleteConnection,
+  vaultConnectDb,
+  vaultMigrateFromLocalStorage
 } from '../services/ipc';
 
 /** WP1: 待确认的 Critical SQL (全局确认对话框状态) */
@@ -30,9 +34,13 @@ interface AppState {
   pendingSafetyConfirm: PendingSafetyConfirm | null;
 
   // Actions
+  /** WP6: 启动引导 — localStorage 幂等迁移 + 从 vault 拉取脱敏列表 */
+  bootstrapVaultData: () => Promise<void>;
+  /** WP6: 从 vault 刷新脱敏连接列表 */
+  refreshConnections: () => Promise<void>;
   addConnection: (config: ConnectionConfig) => Promise<void>;
   updateConnection: (config: ConnectionConfig) => Promise<void>;
-  deleteConnection: (id: string) => void;
+  deleteConnection: (id: string) => Promise<void>;
   setActiveConn: (id: string) => void;
   runQuery: (sql: string) => Promise<void>;
   setAiConfig: (config: AiConfig) => Promise<void>;
@@ -48,14 +56,10 @@ interface AppState {
 }
 
 
-const DEFAULT_CONNECTIONS: ConnectionConfig[] = [];
-
-const savedConns = localStorage.getItem('aidb_connections');
-const initialConnections = savedConns ? JSON.parse(savedConns) : DEFAULT_CONNECTIONS;
-
+// WP6: 连接数据源 = 后端 vault (~/.aidb/connections.enc); 初始为空, bootstrapVaultData 拉取
 export const useAppStore = create<AppState>((set, get) => ({
-  connections: initialConnections,
-  activeConnId: initialConnections[0]?.id || null,
+  connections: [],
+  activeConnId: null,
   activeTab: 'editor',
   queryResult: null,
   aiConfig: {
@@ -69,63 +73,99 @@ export const useAppStore = create<AppState>((set, get) => ({
   errorMsg: null,
   pendingSafetyConfirm: null,
 
-  addConnection: async (config) => {
+  bootstrapVaultData: async () => {
+    // WP6-S5: 一次性迁移 — localStorage 旧明文数据吸入 vault, 成功后才删除明文
     try {
-      await connectDb(config);
-      set((state) => {
-        const next = [...state.connections, config];
-        localStorage.setItem('aidb_connections', JSON.stringify(next));
-        return {
-          connections: next,
-          activeConnId: config.id,
-          errorMsg: null
-        };
-      });
+      if (!localStorage.getItem('aidb_vault_migrated')) {
+        const legacyConns = localStorage.getItem('aidb_connections');
+        const legacyAi = localStorage.getItem('aidb_ai_config');
+        if (legacyConns || legacyAi) {
+          const outcome = await vaultMigrateFromLocalStorage(legacyConns || '[]', legacyAi);
+          // 迁移调用成功才清明文 (T15: 失败不删)
+          localStorage.removeItem('aidb_connections');
+          localStorage.removeItem('aidb_ai_config');
+          localStorage.setItem('aidb_vault_migrated', '1');
+          if (outcome.status === 'migrated' && (outcome.dirty_skipped ?? 0) > 0) {
+            set({ errorMsg: `迁移完成: ${outcome.count} 个连接已加密入库, ${outcome.dirty_skipped} 条脏数据被跳过` });
+          }
+        } else {
+          localStorage.setItem('aidb_vault_migrated', '1');
+        }
+      }
     } catch (err: any) {
-      set((state) => {
-        const next = [...state.connections, config];
-        localStorage.setItem('aidb_connections', JSON.stringify(next));
-        return {
-          connections: next,
-          activeConnId: config.id,
-          errorMsg: `Connection saved with warning: ${err.message || String(err)}`
-        };
-      });
+      // 迁移失败: 保留 localStorage 明文不清除, 显示横幅, 下次启动重试
+      set({ errorMsg: `配置迁移失败 (数据未丢失, 重启将重试): ${err.message || String(err)}` });
+      return;
     }
+    await get().refreshConnections();
+  },
+
+  refreshConnections: async () => {
+    try {
+      const views = await vaultListConnections();
+      set((state) => ({
+        connections: views,
+        activeConnId:
+          state.activeConnId && views.some((c) => c.id === state.activeConnId)
+            ? state.activeConnId
+            : null
+      }));
+    } catch (err: any) {
+      set({ errorMsg: `加载连接列表失败: ${err.message || String(err)}` });
+    }
+  },
+
+  addConnection: async (config) => {
+    // WP6: 密码只经 vaultUpsertConnection 进加密存储; 连接测试走 conn_id (密码不回前端)
+    let warnMsg: string | null = null;
+    try {
+      await vaultUpsertConnection(config);
+    } catch (err: any) {
+      set({ errorMsg: `保存连接失败: ${err.message || String(err)}` });
+      return;
+    }
+    try {
+      await vaultConnectDb(config.id);
+    } catch (err: any) {
+      warnMsg = `Connection saved with warning: ${err.message || String(err)}`;
+    }
+    await get().refreshConnections();
+    set((state) => ({
+      activeConnId: config.id,
+      errorMsg: warnMsg ?? null,
+      connections: state.connections
+    }));
   },
 
   updateConnection: async (config) => {
+    let warnMsg: string | null = null;
     try {
-      await connectDb(config);
-      set((state) => {
-        const next = state.connections.map((c) => (c.id === config.id ? config : c));
-        localStorage.setItem('aidb_connections', JSON.stringify(next));
-        return {
-          connections: next,
-          errorMsg: null
-        };
-      });
+      // 密码留空 → 后端保留原密码 (占位保留语义)
+      await vaultUpsertConnection(config);
     } catch (err: any) {
-      set((state) => {
-        const next = state.connections.map((c) => (c.id === config.id ? config : c));
-        localStorage.setItem('aidb_connections', JSON.stringify(next));
-        return {
-          connections: next,
-          errorMsg: `Updated with warning: ${err.message || String(err)}`
-        };
-      });
+      set({ errorMsg: `更新连接失败: ${err.message || String(err)}` });
+      return;
     }
+    try {
+      await vaultConnectDb(config.id);
+    } catch (err: any) {
+      warnMsg = `Updated with warning: ${err.message || String(err)}`;
+    }
+    await get().refreshConnections();
+    set({ errorMsg: warnMsg });
   },
 
-  deleteConnection: (id) => {
-    set((state) => {
-      const next = state.connections.filter((c) => c.id !== id);
-      localStorage.setItem('aidb_connections', JSON.stringify(next));
-      return {
-        connections: next,
-        activeConnId: state.activeConnId === id ? (next[0]?.id || null) : state.activeConnId
-      };
-    });
+  deleteConnection: async (id) => {
+    try {
+      await vaultDeleteConnection(id);
+    } catch (err: any) {
+      set({ errorMsg: `删除连接失败: ${err.message || String(err)}` });
+      return;
+    }
+    set((state) => ({
+      connections: state.connections.filter((c) => c.id !== id),
+      activeConnId: state.activeConnId === id ? null : state.activeConnId
+    }));
   },
 
 

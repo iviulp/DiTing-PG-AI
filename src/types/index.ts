@@ -90,7 +90,10 @@ export interface ConnectionConfig {
   host: string;
   port: number;
   user: string;
+  /** 明文密码仅出现在"新建/编辑表单提交"瞬时路径; vault 列表视图中恒为 undefined */
   password?: string;
+  /** WP6: vault 脱敏视图标记 — 后端已存有密码 (编辑留空即保留) */
+  password_set?: boolean;
   database: string;
   schema?: string;
   env_tag?: 'PROD' | 'DEV' | 'TEST';

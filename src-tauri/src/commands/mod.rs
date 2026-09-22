@@ -4,6 +4,9 @@ use crate::error::AppError;
 use crate::models::{ConnectionConfig, DbValue, QueryResult};
 use crate::services::ai_service::{AiConfig, AiConfigView, AiService, ChatMessage, StreamEvent};
 use crate::services::db_service::DbService;
+use crate::services::vault_service::{
+    AiConfigVaultView, ConnectionView, MigrateOutcome, VaultService,
+};
 use serde::Serialize;
 use tauri::State;
 
@@ -33,6 +36,149 @@ pub async fn connect_db(
 ) -> Result<(), AppError> {
     tracing::info!(target: "IPC::CMD", db_name = %config.name, "Received connect_db IPC command");
     db_service.connect(config).await
+}
+
+// ============ WP6-S5/S6: Vault 命令组 (密码永不出 Rust 边界) ============
+
+/// 列出脱敏连接视图 (前端唯一列表数据源; 不含明文密码)
+#[tauri::command]
+pub async fn vault_list_connections(
+    vault: State<'_, VaultService>,
+) -> Result<Vec<ConnectionView>, AppError> {
+    vault
+        .list_connections()
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// 保存/更新连接 (密码随配置加密落盘; 留空密码 → 保留原值)
+#[tauri::command]
+pub async fn vault_upsert_connection(
+    config: ConnectionConfig,
+    vault: State<'_, VaultService>,
+) -> Result<(), AppError> {
+    vault
+        .upsert_connection(config)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// 删除连接
+#[tauri::command]
+pub async fn vault_delete_connection(
+    conn_id: String,
+    vault: State<'_, VaultService>,
+) -> Result<(), AppError> {
+    vault
+        .delete_connection(&conn_id)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// WP6-S6: 按 conn_id 连接 — 后端从 vault 取真实密码, 前端不接触
+#[tauri::command]
+pub async fn vault_connect_db(
+    conn_id: String,
+    vault: State<'_, VaultService>,
+    db_service: State<'_, DbService>,
+) -> Result<(), AppError> {
+    let config = vault
+        .get_connection_secret(&conn_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    db_service.connect(config).await
+}
+
+/// WP6-S6: 一次性测试通道 — 保存前测试新配置 (密码留空时从 vault 合并原密码)
+#[tauri::command]
+pub async fn vault_test_connection(
+    mut config: ConnectionConfig,
+    vault: State<'_, VaultService>,
+    db_service: State<'_, DbService>,
+) -> Result<(), AppError> {
+    if config.password.as_ref().map(|p| p.is_empty()).unwrap_or(true) {
+        // 编辑场景留空密码: 从 vault 取原密码合并 (取不到则保持 None)
+        if let Ok(stored) = vault.get_connection_secret(&config.id) {
+            config.password = stored.password;
+        }
+    }
+    db_service.connect(config).await
+}
+
+/// WP6-S5: localStorage 迁移 — 幂等 (enc 已有数据 → already_migrated); 脏条目跳过计数
+#[tauri::command]
+pub async fn vault_migrate_from_localstorage(
+    connections_json: String,
+    ai_config_json: Option<String>,
+    vault: State<'_, VaultService>,
+) -> Result<MigrateOutcome, AppError> {
+    // 1. 解析连接 (容忍脏 JSON → 视为空列表)
+    let configs: Vec<ConnectionConfig> =
+        serde_json::from_str(&connections_json).unwrap_or_default();
+
+    // 2. AI 配置迁移 (仅首次: vault 无配置且传入非空; 旧 localStorage 不含 api_key)
+    if let Some(ai_json) = ai_config_json {
+        if !ai_json.trim().is_empty() {
+            if let Ok(parsed) =
+                serde_json::from_str::<crate::services::vault_service::StoredAiConfig>(&ai_json)
+            {
+                let vault_empty = vault
+                    .get_ai_config()
+                    .map(|c| c.provider_name.is_empty() && c.base_url.is_empty())
+                    .unwrap_or(true);
+                if vault_empty {
+                    let _ = vault.set_ai_config(parsed);
+                }
+            }
+        }
+    }
+
+    // 3. 连接迁移 (幂等在 VaultService::migrate_connections 内保证)
+    vault
+        .migrate_connections(configs)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// WP6-S7: 后端组装导出 payload (含真实密码) → v2 主密码加密 → 保存
+/// 明文密码只在 Rust 进程内存中出现, 不经 IPC 返回前端
+#[tauri::command]
+pub async fn vault_export_bundle(
+    master_password: String,
+    save_dir: Option<String>,
+    vault: State<'_, VaultService>,
+) -> Result<String, AppError> {
+    use crate::services::vault::bundle::encrypt_bundle_v2;
+
+    tracing::info!(target: "SECURITY::VAULT", "Exporting vault bundle (v2)...");
+    let connections = vault
+        .load_all_connections()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let ai = vault
+        .get_ai_config()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let payload = serde_json::json!({
+        "version": "2.0",
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "app": "DiTing Desk (AIDB)",
+        "connections": serde_json::to_value(&connections)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        "ai_config": serde_json::to_value(&ai).map_err(|e| AppError::Internal(e.to_string()))?
+    });
+
+    let export_json = encrypt_bundle_v2(&payload, &master_password)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let file_name = format!(
+        "diting_config_backup_{}.ditingvault",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+    save_file_directly(save_dir, file_name, export_json).await
+}
+
+/// WP6-S3: AI 配置走 vault (脱敏视图)
+#[tauri::command]
+pub async fn vault_get_ai_config(
+    vault: State<'_, VaultService>,
+) -> Result<AiConfigVaultView, AppError> {
+    vault
+        .get_ai_config_view()
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// WP3: 查询指定连接的 SSH 隧道状态 (前端角标/诊断)
@@ -577,116 +723,138 @@ pub async fn save_file_directly(
     Ok(full_path.to_string_lossy().to_string())
 }
 
-/// 导出加密的配置数据包 (包含所有已配置的数据库连接信息和 AI Provider 配置)
-/// 使用内置证书 / 固定密钥 (yuguosheng) + Argon2id 派生密钥 + AES-256-GCM 工业级加解密
+/// WP6-S4: 导出 v2 加密备份 bundle (用户主密码; 委托 vault::bundle 纯函数)
 #[tauri::command]
 pub async fn export_encrypted_bundle(
     connections_json: String,
     ai_config_json: String,
+    master_password: String,
     save_dir: Option<String>,
 ) -> Result<String, AppError> {
-    use aes_gcm::aead::{Aead, KeyInit};
-    use aes_gcm::{Aes256Gcm, Nonce};
-    use rand::RngCore;
+    use crate::services::vault::bundle::{encrypt_bundle_v2, BundleError};
 
-    tracing::info!(target: "SECURITY::VAULT", "Exporting encrypted configuration bundle...");
+    tracing::info!(target: "SECURITY::VAULT", "Exporting encrypted configuration bundle (v2)...");
 
-    // 1. 组装待加密的完整 Payload
     let payload = serde_json::json!({
-        "version": "1.0",
+        "version": "2.0",
         "created_at": chrono::Utc::now().to_rfc3339(),
         "app": "DiTing Desk (AIDB)",
         "connections": serde_json::from_str::<serde_json::Value>(&connections_json).unwrap_or(serde_json::Value::Array(vec![])),
         "ai_config": serde_json::from_str::<serde_json::Value>(&ai_config_json).unwrap_or(serde_json::Value::Null)
     });
 
-    let plaintext = serde_json::to_vec(&payload)
-        .map_err(|e| AppError::Internal(format!("Failed to serialize bundle: {}", e)))?;
+    let export_json = encrypt_bundle_v2(&payload, &master_password).map_err(|e| match e {
+        BundleError::WeakPassword => AppError::Internal(e.to_string()),
+        other => AppError::Internal(other.to_string()),
+    })?;
 
-    // 2. 生成随机 Salt 与 Nonce
-    let mut salt = [0u8; 16];
-    let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-
-    // 3. 使用 Argon2id 从密码 (yuguosheng) 派生 256 位强密钥
-    let password = b"yuguosheng";
-    let mut derived_key = [0u8; 32];
-    let params = argon2::Params::new(19456, 2, 1, Some(32)).unwrap();
-    let argon2_instance = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    argon2_instance
-        .hash_password_into(password, &salt, &mut derived_key)
-        .map_err(|e| AppError::Internal(format!("Argon2 key derivation failed: {}", e)))?;
-
-    // 4. AES-256-GCM 加密
-    let cipher = Aes256Gcm::new_from_slice(&derived_key)
-        .map_err(|e| AppError::Internal(format!("Failed to initialize AES-GCM: {}", e)))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_ref())
-        .map_err(|e| AppError::Internal(format!("AES-GCM encryption failed: {}", e)))?;
-
-    // 5. 组装密文结构并 Base64 编码保存
-    let export_bundle = serde_json::json!({
-        "format": "DITING_ENCRYPTED_VAULT",
-        "crypto": "AES-256-GCM + Argon2id",
-        "salt": urlencoding::encode_binary(&salt).into_owned(),
-        "nonce": urlencoding::encode_binary(&nonce_bytes).into_owned(),
-        "ciphertext": urlencoding::encode_binary(&ciphertext).into_owned()
-    });
-
-    let export_json = serde_json::to_string_pretty(&export_bundle)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    let file_name = format!("diting_config_backup_{}.ditingvault", chrono::Local::now().format("%Y%m%d_%H%M%S"));
-    let saved_path = save_file_directly(save_dir, file_name, export_json).await?;
-    Ok(saved_path)
+    let file_name = format!(
+        "diting_config_backup_{}.ditingvault",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+    save_file_directly(save_dir, file_name, export_json).await
 }
 
-/// 导入加密配置数据包并自动解密 (使用证书固定密钥 yuguosheng 解码并校验签名)
+/// 导入失败限速 (WP6 T14: 5 次失败/30s 窗口 → 拒绝, 防暴力破解)
+mod import_rate_limit {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    pub static FAIL_COUNT: AtomicU32 = AtomicU32::new(0);
+    pub static WINDOW_START: AtomicU64 = AtomicU64::new(0);
+    pub const LIMIT: u32 = 5;
+    pub const WINDOW_SECS: u64 = 30;
+
+    pub fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+    pub fn bump() {
+        FAIL_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    pub fn check() -> Option<u64> {
+        // 返回 Some(剩余秒) 表示被限速
+        let now = now_secs();
+        let start = WINDOW_START.load(Ordering::SeqCst);
+        if now.saturating_sub(start) > WINDOW_SECS {
+            FAIL_COUNT.store(0, Ordering::SeqCst);
+            WINDOW_START.store(now, Ordering::SeqCst);
+            return None;
+        }
+        if FAIL_COUNT.load(Ordering::SeqCst) >= LIMIT {
+            return Some(WINDOW_SECS.saturating_sub(now.saturating_sub(start)));
+        }
+        None
+    }
+    #[cfg(test)]
+    pub fn reset() {
+        FAIL_COUNT.store(0, Ordering::SeqCst);
+        WINDOW_START.store(0, Ordering::SeqCst);
+    }
+}
+
+/// WP6-S4: 导入备份 bundle — v2 主密码 / legacy v1 旧密钥分支 (委托 vault::bundle)
+/// 返回解密 JSON; legacy 时 payload 内含 "legacy_import": true 供前端引导升级
 #[tauri::command]
 pub async fn import_encrypted_bundle(
     file_content: String,
+    master_password: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
-    use aes_gcm::aead::{Aead, KeyInit};
-    use aes_gcm::{Aes256Gcm, Nonce};
+    use crate::services::vault::bundle::{decrypt_bundle, BundleError};
 
-    tracing::info!(target: "SECURITY::VAULT", "Importing and decrypting configuration bundle...");
+    tracing::info!(target: "SECURITY::VAULT", "Importing configuration bundle...");
 
-    let vault: serde_json::Value = serde_json::from_str(&file_content)
-        .map_err(|_| AppError::Internal("无效的备份文件格式，请确保上传的是 .ditingvault 加密文件。".into()))?;
-
-    if vault.get("format").and_then(|v| v.as_str()) != Some("DITING_ENCRYPTED_VAULT") {
-        return Err(AppError::Internal("非法的谛听加密备份凭证，无法识别的安全签名。".into()));
+    if let Some(wait) = import_rate_limit::check() {
+        return Err(AppError::Internal(format!(
+            "密码错误次数过多, 请 {wait} 秒后再试 (防暴力破解限速)"
+        )));
     }
 
-    let salt_str = vault.get("salt").and_then(|v| v.as_str()).ok_or_else(|| AppError::Internal("Missing salt".into()))?;
-    let nonce_str = vault.get("nonce").and_then(|v| v.as_str()).ok_or_else(|| AppError::Internal("Missing nonce".into()))?;
-    let ciphertext_str = vault.get("ciphertext").and_then(|v| v.as_str()).ok_or_else(|| AppError::Internal("Missing ciphertext".into()))?;
+    let result = decrypt_bundle(&file_content, master_password.as_deref());
+    match result {
+        Ok((json, is_legacy)) => {
+            if is_legacy {
+                tracing::warn!(target: "SECURITY::VAULT", "Legacy v1 bundle imported — 建议立即用主密码重新导出为 v2");
+            }
+            Ok(json)
+        }
+        Err(e) => {
+            // 仅密码/篡改类失败计入限速 (格式错误不消耗配额)
+            if matches!(e, BundleError::DecryptFailed) {
+                import_rate_limit::bump();
+            }
+            Err(AppError::Internal(e.to_string()))
+        }
+    }
+}
 
-    let salt = urlencoding::decode_binary(salt_str.as_bytes());
-    let nonce_bytes = urlencoding::decode_binary(nonce_str.as_bytes());
-    let ciphertext = urlencoding::decode_binary(ciphertext_str.as_bytes());
+// ============ WP6 T14: 限速单测 ============
+#[cfg(test)]
+mod tests_import_rate_limit {
+    use super::import_rate_limit;
 
-    // 使用 Argon2id 从固定密码 yuguosheng 派生密钥
-    let password = b"yuguosheng";
-    let mut derived_key = [0u8; 32];
-    let params = argon2::Params::new(19456, 2, 1, Some(32)).unwrap();
-    let argon2_instance = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    argon2_instance
-        .hash_password_into(password, &salt, &mut derived_key)
-        .map_err(|e| AppError::Internal(format!("Argon2 key derivation failed: {}", e)))?;
+    #[test]
+    fn t14_rate_limit_after_5_fails() {
+        import_rate_limit::reset();
+        assert!(import_rate_limit::check().is_none(), "初始不限速");
+        for _ in 0..5 {
+            import_rate_limit::bump();
+        }
+        let r = import_rate_limit::check();
+        assert!(r.is_some(), "5 次失败后必须限速");
+        assert!(r.unwrap() > 0 && r.unwrap() <= 30, "剩余等待秒数在窗口内");
+        import_rate_limit::reset();
+        assert!(import_rate_limit::check().is_none(), "reset 后恢复");
+    }
 
-    // AES-256-GCM 解密
-    let cipher = Aes256Gcm::new_from_slice(&derived_key)
-        .map_err(|e| AppError::Internal(format!("AES initialization failed: {}", e)))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let decrypted_bytes = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|_| AppError::Internal("解密校验失败！证书密码不匹配或备份数据已被非法篡改。".into()))?;
-
-    let decrypted_json: serde_json::Value = serde_json::from_slice(&decrypted_bytes)
-        .map_err(|e| AppError::Internal(format!("Failed to parse decrypted data: {}", e)))?;
-
-    Ok(decrypted_json)
+    #[test]
+    fn t14_under_limit_not_blocked() {
+        import_rate_limit::reset();
+        for _ in 0..4 {
+            import_rate_limit::bump();
+        }
+        assert!(import_rate_limit::check().is_none(), "4 次失败仍未达阈值");
+        import_rate_limit::reset();
+    }
 }

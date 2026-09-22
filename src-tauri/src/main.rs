@@ -8,6 +8,7 @@ mod services;
 
 use services::ai_service::AiService;
 use services::db_service::DbService;
+use services::vault_service::VaultService;
 use tracing_subscriber::fmt;
 use tracing_subscriber::EnvFilter;
 
@@ -32,8 +33,17 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(db_service)
         .manage(AiService::new())
+        .manage(VaultService::new())
         .invoke_handler(tauri::generate_handler![
             commands::connect_db,
+            commands::vault_list_connections,
+            commands::vault_upsert_connection,
+            commands::vault_delete_connection,
+            commands::vault_connect_db,
+            commands::vault_test_connection,
+            commands::vault_migrate_from_localstorage,
+            commands::vault_get_ai_config,
+            commands::vault_export_bundle,
             commands::get_tunnel_state,
             commands::close_tunnel,
             commands::execute_sql,

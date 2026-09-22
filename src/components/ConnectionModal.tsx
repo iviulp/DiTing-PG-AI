@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ConnectionConfig, DatabaseType } from '../types';
-import { connectDb } from '../services/ipc';
+import { vaultTestConnection } from '../services/ipc';
 import { Shield, Key, Lock, CheckCircle2, AlertCircle } from 'lucide-react';
 
 
@@ -169,7 +169,8 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
     };
 
     try {
-      await connectDb(tempConfig);
+      // WP6-S6: 一次性测试通道 (不注册连接池, 密码不落 localStorage)
+      await vaultTestConnection(tempConfig);
       setTestStatus({
         testing: false,
         message: 'Connection successful! (Rust SQLx Pool Connected)',

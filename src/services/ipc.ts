@@ -213,25 +213,88 @@ export async function saveFileDirectly(dirPath: string | null, fileName: string,
 }
 
 /**
- * 导出经过高强加密的数据库连接与 AI 配置数据包
+ * WP6: 导出 v2 加密备份 (用户主密码 ≥8 位; 不再使用内置固定密钥)
  */
 export async function exportEncryptedBundle(
   connectionsJson: string,
   aiConfigJson: string,
+  masterPassword: string,
   saveDir?: string | null
 ): Promise<string> {
   return await invoke('export_encrypted_bundle', {
     connectionsJson,
     aiConfigJson,
+    masterPassword,
     saveDir: saveDir || null,
   });
 }
 
 /**
- * 导入加密数据包并自动解密 (密码: yuguosheng)
+ * WP6: 导入加密备份 — v2 需主密码; legacy v1 自动用旧密钥解密并返回 legacy_import:true
  */
-export async function importEncryptedBundle(fileContent: string): Promise<any> {
-  return await invoke('import_encrypted_bundle', { fileContent });
+export async function importEncryptedBundle(
+  fileContent: string,
+  masterPassword?: string | null
+): Promise<any> {
+  return await invoke('import_encrypted_bundle', {
+    fileContent,
+    masterPassword: masterPassword ?? null,
+  });
+}
+
+// ============ WP6: Vault 命令 (密码永不出 Rust 边界) ============
+
+/** 列出脱敏连接视图 (password_set 标记; 无明文密码) */
+export async function vaultListConnections(): Promise<ConnectionConfig[]> {
+  return await invoke('vault_list_connections');
+}
+
+/** 保存/更新连接 (加密落盘; 编辑时密码留空 → 后端保留原密码) */
+export async function vaultUpsertConnection(config: ConnectionConfig): Promise<void> {
+  return await invoke('vault_upsert_connection', { config });
+}
+
+/** 删除连接 */
+export async function vaultDeleteConnection(connId: string): Promise<void> {
+  return await invoke('vault_delete_connection', { connId });
+}
+
+/** WP6-S6: 按 conn_id 连接 — 后端从 vault 取真实密码 */
+export async function vaultConnectDb(connId: string): Promise<void> {
+  return await invoke('vault_connect_db', { connId });
+}
+
+/** WP6-S6: 一次性测试通道 (保存前测试; 密码留空自动合并 vault 原密码) */
+export async function vaultTestConnection(config: ConnectionConfig): Promise<void> {
+  return await invoke('vault_test_connection', { config });
+}
+
+export interface MigrateOutcome {
+  status: 'already_migrated' | 'migrated';
+  count?: number;
+  dirty_skipped?: number;
+}
+
+/** WP6-S7: 后端组装 payload (真实密码不出 Rust) → v2 主密码加密导出 */
+export async function vaultExportBundle(
+  masterPassword: string,
+  saveDir?: string | null
+): Promise<string> {
+  return await invoke('vault_export_bundle', {
+    masterPassword,
+    saveDir: saveDir ?? null,
+  });
+}
+
+/** WP6-S5: localStorage → vault 幂等迁移 */
+export async function vaultMigrateFromLocalStorage(
+  connectionsJson: string,
+  aiConfigJson?: string | null
+): Promise<MigrateOutcome> {
+  return await invoke('vault_migrate_from_localstorage', {
+    connectionsJson,
+    aiConfigJson: aiConfigJson ?? null,
+  });
 }
 
 

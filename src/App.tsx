@@ -17,7 +17,7 @@ import { SafetyConfirmDialog } from './components/SafetyConfirmDialog';
 
 
 import { ConnectionConfig } from './types';
-import { connectDb, executeSql, executeSqlWithGuard, onTunnelDisconnected } from './services/ipc';
+import { executeSql, executeSqlWithGuard, onTunnelDisconnected, vaultConnectDb, vaultUpsertConnection } from './services/ipc';
 import { mapTunnelError } from './utils/tunnelError';
 import {
   quoteIdentifier,
@@ -85,6 +85,11 @@ export const App: React.FC = () => {
 
 
 
+  // WP6: 启动引导 — localStorage 迁移 + 从 vault 拉取脱敏连接列表
+  useEffect(() => {
+    useAppStore.getState().bootstrapVaultData();
+  }, []);
+
   useEffect(() => {
     loadAiConfig();
   }, [loadAiConfig]);
@@ -121,7 +126,8 @@ export const App: React.FC = () => {
     // 进入工作区时重置默认 SQL，避免上一次执行残留或语法误判
     setSqlText(`-- Connected to: ${conn.name} (${conn.database})\nSELECT * FROM "information_schema"."tables" WHERE table_schema NOT IN ('information_schema', 'pg_catalog') LIMIT 50;`);
     try {
-      await connectDb(conn);
+      // WP6-S6: conn_id 寻址, 后端从 vault 取真实密码
+      await vaultConnectDb(conn.id);
       useAppStore.setState({ errorMsg: null, queryResult: null });
       setInWorkspace(true);
       // WP3: 重连成功 → 清除隧道断开角标
@@ -146,9 +152,10 @@ export const App: React.FC = () => {
     if (!activeConn || newDb === activeDatabase) return;
     try {
       const updatedConfig = { ...activeConn, database: newDb };
-      await connectDb(updatedConfig);
+      // WP6: 先加密落盘新 database, 再按 conn_id 重连 (密码不经前端)
+      await vaultUpsertConnection(updatedConfig);
+      await vaultConnectDb(updatedConfig.id);
       setActiveDatabase(newDb);
-      // 同时更新当前连接对象的内存配置
       await updateConnection(updatedConfig);
     } catch (err: any) {
       alert(`切换数据库到 [${newDb}] 失败：\n${err.message || String(err)}`);
@@ -261,12 +268,7 @@ export const App: React.FC = () => {
     } else {
       await addConnection(config);
     }
-    // 强制调用 connectDb 刷新后端 Rust 注册池中的 ReadOnly 配置
-    try {
-      await connectDb(config);
-    } catch (err: any) {
-      console.warn('Backend connectDb refresh warning:', err);
-    }
+    // WP6: addConnection/updateConnection 内部已 vaultConnectDb 刷新注册池 (含 read_only)
     setEditingConn(null);
     setIsDuplicateModal(false);
   };
