@@ -4,6 +4,7 @@
 use crate::error::AppError;
 use crate::models::{ColumnMetadata, ConnectionConfig, DatabaseType, DbValue, QueryResult};
 use crate::services::safety_checker::{RiskLevel, SqlSafetyChecker};
+use crate::services::tunnel_service::{TunnelManager, TunnelState};
 
 use sqlx::{Column, Row, TypeInfo};
 use sqlx::postgres::PgPoolOptions;
@@ -23,13 +24,26 @@ pub enum AnyPool {
 /// 全局连接池调度服务
 pub struct DbService {
     pools: Arc<RwLock<HashMap<String, (AnyPool, ConnectionConfig)>>>,
+    /// WP3: SSH 隧道管理器 (conn_id → 隧道句柄); 断开事件总线在 TunnelManager 内
+    pub tunnels: Arc<TunnelManager>,
 }
 
 impl DbService {
     pub fn new() -> Self {
         Self {
             pools: Arc::new(RwLock::new(HashMap::new())),
+            tunnels: Arc::new(TunnelManager::new()),
         }
+    }
+
+    /// 订阅隧道被动断开事件 (返回 conn_id 流; main.rs 转发为 tauri event)
+    pub fn subscribe_tunnel_disconnects(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.tunnels.subscribe_disconnects()
+    }
+
+    /// WP3: 查询隧道状态 (IPC 暴露给前端角标)
+    pub async fn tunnel_state(&self, conn_id: &str) -> TunnelState {
+        self.tunnels.state(conn_id).await
     }
 
     /// 将 psql 命令行专有的元命令 (\\l, \\dt, \\d <table>, \\dn, \\du, \\df, \\di, \\c 等) 转译为等效的 PostgreSQL 系统目录 SQL
@@ -100,7 +114,32 @@ impl DbService {
     /// 建立并注册新的数据库连接池
     pub async fn connect(&self, config: ConnectionConfig) -> Result<(), AppError> {
         let conn_id = config.id.clone();
-        
+
+        // WP3: SSH 隧道集成 — enabled && 非 Sqlite 时先开隧道, 连接指向 127.0.0.1:local_port
+        // (重连时 TunnelManager::open 内部先关旧隧道, 不泄漏句柄)
+        let use_tunnel = config
+            .ssh_tunnel
+            .as_ref()
+            .map(|t| t.enabled)
+            .unwrap_or(false);
+        let (eff_host, eff_port) = if use_tunnel {
+            if config.db_type == DatabaseType::Sqlite {
+                return Err(AppError::tunnel(
+                    crate::services::tunnel_service::tunnel_err::INVALID_CONFIG,
+                    "SQLite 是本地文件数据库, 不支持 SSH 隧道",
+                ));
+            }
+            let t = config.ssh_tunnel.clone().unwrap();
+            let local_port = self
+                .tunnels
+                .open(&conn_id, t, config.host.clone(), config.port)
+                .await?;
+            tracing::info!(target: "DB::TUNNEL", conn_id = %conn_id, local_port, "SSH tunnel established");
+            ("127.0.0.1".to_string(), local_port)
+        } else {
+            (config.host.clone(), config.port)
+        };
+
         let pool = match config.db_type {
             DatabaseType::Postgres => {
                 let encoded_pass = urlencoding::encode(config.password.as_deref().unwrap_or(""));
@@ -108,15 +147,24 @@ impl DbService {
                     "postgres://{}:{}@{}:{}/{}",
                     config.user,
                     encoded_pass,
-                    config.host,
-                    config.port,
+                    eff_host,
+                    eff_port,
                     config.database
                 );
                 let p = PgPoolOptions::new()
                     .max_connections(5)
                     .acquire_timeout(std::time::Duration::from_secs(10))
                     .connect(&url)
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        // 隧道模式下 DB 连接失败: 关隧道避免悬挂资源
+                        if use_tunnel {
+                            let tunnels = self.tunnels.clone();
+                            let cid = conn_id.clone();
+                            tokio::spawn(async move { tunnels.close(&cid).await });
+                        }
+                        AppError::Database(e.to_string())
+                    })?;
                 AnyPool::Postgres(p)
             }
             DatabaseType::Mysql => {
@@ -125,15 +173,23 @@ impl DbService {
                     "mysql://{}:{}@{}:{}/{}",
                     config.user,
                     encoded_pass,
-                    config.host,
-                    config.port,
+                    eff_host,
+                    eff_port,
                     config.database
                 );
                 let p = MySqlPoolOptions::new()
                     .max_connections(5)
                     .acquire_timeout(std::time::Duration::from_secs(10))
                     .connect(&url)
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        if use_tunnel {
+                            let tunnels = self.tunnels.clone();
+                            let cid = conn_id.clone();
+                            tokio::spawn(async move { tunnels.close(&cid).await });
+                        }
+                        AppError::Database(e.to_string())
+                    })?;
                 AnyPool::MySql(p)
             }
 

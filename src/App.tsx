@@ -17,7 +17,8 @@ import { SafetyConfirmDialog } from './components/SafetyConfirmDialog';
 
 
 import { ConnectionConfig } from './types';
-import { connectDb, executeSql, executeSqlWithGuard } from './services/ipc';
+import { connectDb, executeSql, executeSqlWithGuard, onTunnelDisconnected } from './services/ipc';
+import { mapTunnelError } from './utils/tunnelError';
 import {
   Database,
   Play,
@@ -83,6 +84,15 @@ export const App: React.FC = () => {
     loadAiConfig();
   }, [loadAiConfig]);
 
+  // WP3: 监听隧道被动断开事件 → 显示断开角标 (重连成功后清除)
+  const [tunnelDownConns, setTunnelDownConns] = useState<string[]>([]);
+  useEffect(() => {
+    const unlisten = onTunnelDisconnected((connId) => {
+      setTunnelDownConns((prev) => (prev.includes(connId) ? prev : [...prev, connId]));
+    });
+    return unlisten;
+  }, []);
+
   const activeConn = connections.find((c) => c.id === activeConnId);
   const [databases, setDatabases] = useState<string[]>([]);
   const [activeDatabase, setActiveDatabase] = useState<string>('');
@@ -109,12 +119,20 @@ export const App: React.FC = () => {
       await connectDb(conn);
       useAppStore.setState({ errorMsg: null, queryResult: null });
       setInWorkspace(true);
+      // WP3: 重连成功 → 清除隧道断开角标
+      setTunnelDownConns((prev) => prev.filter((id) => id !== conn.id));
       await fetchDatabases(conn);
     } catch (err: any) {
+      const rawMsg = err?.message || String(err);
+      // WP3: 隧道错误码 → 友好中文文案 (code 形如 TUNNEL_AUTH_FAILED: xxx)
+      const tunnelCodeMatch = rawMsg.match(/TUNNEL_[A-Z_]+/);
+      const displayMsg = tunnelCodeMatch
+        ? mapTunnelError(tunnelCodeMatch[0], rawMsg)
+        : rawMsg;
       useAppStore.setState({
-        errorMsg: `Failed to open connection "${conn.name}": ${err.message || String(err)}`
+        errorMsg: `Failed to open connection "${conn.name}": ${displayMsg}`
       });
-      alert(`⛔ 数据库连接拒绝 (FATAL Error)：\n无法建立到 "${conn.name}" 的连接。\n原因：${err.message || String(err)}`);
+      alert(`⛔ 数据库连接拒绝 (FATAL Error)：\n无法建立到 "${conn.name}" 的连接。\n原因：${displayMsg}`);
       throw err;
     }
   };
@@ -412,6 +430,15 @@ export const App: React.FC = () => {
           >
             <Database className="w-4 h-4 text-blue-400" />
             <span>{activeConn?.name}</span>
+            {/* WP3: 隧道断开角标 */}
+            {activeConn && tunnelDownConns.includes(activeConn.id) && (
+              <span
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-400 text-[10px] font-bold"
+                title="SSH 隧道已断开，请重新连接"
+              >
+                隧道断开
+              </span>
+            )}
           </div>
 
           {/* Database Switcher */}

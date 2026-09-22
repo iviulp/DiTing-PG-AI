@@ -57,6 +57,11 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 encoding_rs = "0.8"
 urlencoding = "2.1"
 
+# WP3: SSH 隧道 (纯 Rust, tokio 原生; 选型见 docs/plans/WP3-ssh-tunnel.md 会议1)
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+dirs = "7"
+
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"

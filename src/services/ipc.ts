@@ -1,4 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
 
 /**
@@ -57,6 +58,33 @@ export async function executeSqlWithGuard(
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+/** WP3: 隧道状态 (后端 TunnelState serde tag 形式) */
+export type TunnelState =
+  | { state: 'disconnected' }
+  | { state: 'connecting' }
+  | { state: 'authenticating' }
+  | { state: 'forwarding' }
+  | { state: 'closing' }
+  | { state: 'failed'; code: string; message: string };
+
+export async function getTunnelState(connId: string): Promise<TunnelState> {
+  return await invoke('get_tunnel_state', { connId });
+}
+
+export async function closeTunnel(connId: string): Promise<void> {
+  await invoke('close_tunnel', { connId });
+}
+
+/** WP3: 订阅隧道被动断开事件 (后端 emit "tunnel-disconnected", payload = conn_id) */
+export function onTunnelDisconnected(cb: (connId: string) => void): () => void {
+  const unlistenPromise = listen<string>('tunnel-disconnected', (event) => {
+    cb(event.payload);
+  });
+  return () => {
+    unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+  };
 }
 
 export async function aiChat(prompt: string, schemaContext?: string, history?: ChatMessage[]): Promise<string> {

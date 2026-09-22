@@ -47,6 +47,23 @@ pub enum AppError {
     /// 内部通用错误或加解密异常
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// WP3: SSH 隧道错误 (错误码冻结清单见 docs/plans/WP3-ssh-tunnel.md 附录)
+    #[error("{code}: {message}")]
+    Tunnel {
+        code: String,
+        message: String,
+    },
+}
+
+impl AppError {
+    /// WP3: 构造隧道错误的便捷方法
+    pub fn tunnel(code: &str, message: impl Into<String>) -> Self {
+        AppError::Tunnel {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
 }
 
 /// 导出给 Tauri IPC 前端的序列化错误 DTO
@@ -124,6 +141,13 @@ impl AppError {
             AppError::Internal(msg) => AppErrorDto {
                 code: "INTERNAL_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
+            },
+            AppError::Tunnel { code, message } => AppErrorDto {
+                code: code.clone(),
+                message: message.clone(),
                 risk_level: None,
                 requires_confirmation: None,
                 reasons: None,

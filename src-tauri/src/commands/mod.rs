@@ -35,6 +35,25 @@ pub async fn connect_db(
     db_service.connect(config).await
 }
 
+/// WP3: 查询指定连接的 SSH 隧道状态 (前端角标/诊断)
+#[tauri::command]
+pub async fn get_tunnel_state(
+    conn_id: String,
+    db_service: State<'_, DbService>,
+) -> Result<crate::services::tunnel_service::TunnelState, AppError> {
+    Ok(db_service.tunnel_state(&conn_id).await)
+}
+
+/// WP3: 手动关闭指定连接的 SSH 隧道
+#[tauri::command]
+pub async fn close_tunnel(
+    conn_id: String,
+    db_service: State<'_, DbService>,
+) -> Result<(), AppError> {
+    db_service.tunnels.close(&conn_id).await;
+    Ok(())
+}
+
 /// 执行 SQL 查询并返回强类型数据集
 /// WP1: force=true 表示用户已确认 Critical 风险 (二次确认后重发), 仅豁免确认策略, 不豁免 read_only
 #[tauri::command]
