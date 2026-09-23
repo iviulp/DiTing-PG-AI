@@ -65,3 +65,12 @@ dirs = "7"
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
+
+# WP7: Xcode 27 beta ld (ld-27037) 对 release 优化的 proc-macro dylib 产生
+# "mis-aligned LINKEDIT string pool" 导致 dlopen 失败 (sqlx_macros)。
+# build-override 让 build-deps/proc-macro 以 dev 等效方式链接, 规避该工具链 bug;
+# 最终二进制仍为完整 release 优化。待 Xcode 正式版修复后可移除。
+[profile.release.build-override]
+opt-level = 0
+debug = false
+strip = "none"
