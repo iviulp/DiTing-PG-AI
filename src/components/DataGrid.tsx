@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { QueryResult, QueryResultTabItem } from '../types';
-import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Copy, Filter } from 'lucide-react';
+import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Copy, Filter, ClipboardPaste } from 'lucide-react';
 import { RowDetailDrawer } from './RowDetailDrawer';
 import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
 import { errToStr } from '../services/ipc';
@@ -134,6 +134,52 @@ export const DataGrid: React.FC<DataGridProps> = ({
       emptyRow[col.name] = '';
     });
     setAddedRows((prev) => [...prev, emptyRow]);
+  };
+
+  // WP9-P2-7: 从剪贴板粘贴多行 TSV 造数 (Excel/表格软件复制即 Tab 分隔)
+  // 规则: 按 \n 分行、\t 分列, 依当前列顺序对位; 列数不足补空, 多余截断并提示;
+  //       首行若与列名完全一致视为表头自动跳过 (防把表头当数据)
+  const handlePasteRows = async () => {
+    if (!result) return;
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (e) {
+      showAlert(`无法读取剪贴板: ${errToStr(e)}\n\n提示: 部分系统需要应用获得剪贴板权限。`, { title: '粘贴行失败' });
+      return;
+    }
+    if (!text || !text.trim()) {
+      showAlert('剪贴板为空 — 请先从 Excel/表格软件复制多行数据 (Tab 分隔)。', { title: '粘贴行' });
+      return;
+    }
+    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter((l) => l.length > 0);
+    if (lines.length === 0) return;
+    const colNames = result.columns.map((c) => c.name);
+    let startIdx = 0;
+    // 表头检测: 首行按 Tab 切分后与列名序列完全一致
+    const firstCells = lines[0].split('\t').map((c) => c.trim());
+    if (firstCells.length === colNames.length && firstCells.every((c, i) => c === colNames[i])) {
+      startIdx = 1;
+    }
+    const dataLines = lines.slice(startIdx);
+    if (dataLines.length === 0) {
+      showAlert('剪贴板内容只有表头, 没有数据行。', { title: '粘贴行' });
+      return;
+    }
+    let truncated = 0;
+    const newRows: Record<string, string>[] = dataLines.map((line) => {
+      const cells = line.split('\t');
+      if (cells.length > colNames.length) truncated++;
+      const row: Record<string, string> = {};
+      colNames.forEach((name, i) => {
+        row[name] = cells[i] ?? '';
+      });
+      return row;
+    });
+    setAddedRows((prev) => [...prev, ...newRows]);
+    if (truncated > 0) {
+      showAlert(`已粘贴 ${newRows.length} 行到暂存区 (未提交)。\n\n注意: 其中 ${truncated} 行的列数多于当前结果集列数 (${colNames.length} 列), 多余部分已截断。请核对后再提交。`, { title: '粘贴行完成 (有截断)' });
+    }
   };
 
   // 标记/取消标记删除选中行
@@ -406,6 +452,18 @@ export const DataGrid: React.FC<DataGridProps> = ({
           >
             <Plus className="w-3.5 h-3.5" /> 增加行
           </button>
+
+          {/* WP9-P2-7: 粘贴多行 TSV 造数 (QA/开发批量造测试数据) */}
+          {!result.is_read_only && (
+            <button
+              onClick={handlePasteRows}
+              className="px-2.5 py-1 bg-[#1a1d26] hover:bg-[#222733] text-slate-300 rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors border border-[#272d3b]"
+              title="从剪贴板粘贴多行 (Tab 分隔, 如从 Excel 复制) 到暂存区"
+              data-testid="paste-rows-btn"
+            >
+              <ClipboardPaste className="w-3.5 h-3.5 text-cyan-400" /> 粘贴行
+            </button>
+          )}
 
           <button
             disabled={selectedRowIdx === null}

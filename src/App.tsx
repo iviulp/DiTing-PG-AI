@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { explainPgError } from './utils/pgErrorHints';
+import { ShortcutsHelpModal } from './components/ShortcutsHelpModal';
 import { useAppStore } from './store/useAppStore';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { SqlEditor } from './components/SqlEditor';
@@ -74,6 +75,8 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSavedSqlOpen, setIsSavedSqlOpen] = useState(false);
   const [isCliConsoleOpen, setIsCliConsoleOpen] = useState(false);
+  // WP9-P2-9: 快捷键与功能速查表
+  const [isShortcutsHelpOpen, setIsShortcutsHelpOpen] = useState(false);
   const [tempAiConfig, setTempAiConfig] = useState(aiConfig);
 
   // New Management Modals State
@@ -93,6 +96,7 @@ export const App: React.FC = () => {
   // WP9-P1-1: 全局快捷键 (抽取为可测 hook: Esc 关最上层弹窗 / Cmd+B 切 AI 侧栏 / Cmd+R 执行 SQL)
   useGlobalShortcuts({
     modals: [
+      { isOpen: isShortcutsHelpOpen, close: () => setIsShortcutsHelpOpen(false) },
       { isOpen: isUserMgmtOpen, close: () => setIsUserMgmtOpen(false) },
       { isOpen: isProcessModalOpen, close: () => setIsProcessModalOpen(false) },
       { isOpen: isDesignerOpen, close: () => setIsDesignerOpen(false) },
@@ -582,6 +586,16 @@ export const App: React.FC = () => {
             <span>Export</span>
           </button>
 
+          {/* WP9-P2-9: 快捷键与功能速查表 */}
+          <button
+            onClick={() => setIsShortcutsHelpOpen(true)}
+            className="p-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-slate-300"
+            title="快捷键与功能速查 (?)"
+            data-testid="shortcuts-help-btn"
+          >
+            <span className="text-xs font-bold leading-none">?</span>
+          </button>
+
           <button
             onClick={() => {
               setTempAiConfig(aiConfig);
@@ -1039,6 +1053,8 @@ export const App: React.FC = () => {
           onReject={() => resolveSafetyConfirm(false)}
         />
       )}
+      {/* WP9-P2-9: 快捷键与功能速查表 */}
+      <ShortcutsHelpModal isOpen={isShortcutsHelpOpen} onClose={() => setIsShortcutsHelpOpen(false)} />
     </div>
   );
 };
