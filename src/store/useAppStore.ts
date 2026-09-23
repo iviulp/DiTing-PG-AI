@@ -12,7 +12,17 @@ import {
   vaultDeleteConnection,
   vaultConnectDb,
   vaultMigrateFromLocalStorage
-, errToStr } from '../services/ipc';
+, errToStr,
+  executeSql,
+  getPrimaryKeyColumns,
+  getRelTuplesEstimate } from '../services/ipc';
+import {
+  BrowseFilter,
+  FilterCombinator,
+  buildTableCountSql,
+  buildTablePageSql,
+  buildHandwrittenPaging,
+} from '../utils/browseSqlBuilder';
 
 /** WP1: 待确认的 Critical SQL (全局确认对话框状态) */
 export interface PendingSafetyConfirm {
@@ -20,6 +30,31 @@ export interface PendingSafetyConfirm {
   sql: string;
   payload: SafetyBlockedPayload;
   resolve: (approved: boolean) => void;
+}
+
+/** WP10: 分页状态机 — 浏览表模式 / 手写 SQL 模式统一 */
+export interface PagingState {
+  mode: 'table' | 'sql';
+  /** table 模式 */
+  schema?: string;
+  table?: string;
+  orderByColumns?: string[];
+  orderByDirection?: 'ASC' | 'DESC';
+  allColumns?: string[];
+  filters: BrowseFilter[];
+  combinator: FilterCombinator;
+  /** sql 模式 (规范化后的 SQL, 已剥尾部 LIMIT/OFFSET) */
+  normalizedSql?: string;
+  /** 共用 */
+  page: number;          // 1-based
+  pageSize: number;
+  total: number | null;  // null = 尚未取到
+  totalIsEstimate: boolean;
+  loading: boolean;
+  /** 当前页真实 SQL (编辑器同步显示用) */
+  currentPageSql: string;
+  /** 手写 SQL 自带 LIMIT 被剥离提示 */
+  strippedOwnLimit?: boolean;
 }
 
 interface AppState {
@@ -32,6 +67,8 @@ interface AppState {
   errorMsg: string | null;
   /** WP1: 当前等待用户确认的高危 SQL (null = 无) */
   pendingSafetyConfirm: PendingSafetyConfirm | null;
+  /** WP10: 分页状态 (null = 非分页模式 — 普通执行/写操作) */
+  paging: PagingState | null;
 
   // Actions
   /** WP6: 启动引导 — localStorage 幂等迁移 + 从 vault 拉取脱敏列表 */
@@ -53,6 +90,21 @@ interface AppState {
   ) => Promise<string>;
   /** WP1: 用户在全局确认框做出选择 */
   resolveSafetyConfirm: (approved: boolean) => void;
+
+  // ===== WP10 分页 actions =====
+  /** 浏览表模式入口 (SchemaTree 单击表): 估算→PK→COUNT→第1页 */
+  browseTable: (schema: string, table: string) => Promise<void>;
+  /** 手写 SQL 分页执行 (runQuery 检测到单条 SELECT 时自动进入) */
+  runQueryPaged: (sql: string, pageSize?: number) => Promise<void>;
+  /** 翻页 / 改页大小 (自动重发 SQL — 用户要的"自动执行第二个 SQL") */
+  pagingGotoPage: (page: number) => Promise<void>;
+  pagingSetPageSize: (size: number) => Promise<void>;
+  /** 过滤器变更 → 回第 1 页重查 (QA 矩阵第 5 条) */
+  pagingSetFilters: (filters: BrowseFilter[], combinator: FilterCombinator) => Promise<void>;
+  /** 排序变更 → 回第 1 页 */
+  pagingSetOrderBy: (columns: string[], direction: 'ASC' | 'DESC') => Promise<void>;
+  /** 退出分页模式 (回到普通执行) */
+  clearPaging: () => void;
 }
 
 
@@ -62,6 +114,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeConnId: null,
   activeTab: 'editor',
   queryResult: null,
+  paging: null,
   aiConfig: {
     provider_name: 'Custom BaseURL',
     base_url: 'https://api.openai.com/v1',
@@ -253,6 +306,236 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err: any) {
       throw new Error(errToStr(err));
     }
-  }
+  },
+
+  // ===================== WP10 分页状态机 =====================
+
+  browseTable: async (schema, table) => {
+    const { activeConnId } = get();
+    if (!activeConnId) return;
+    const pageSize = get().paging?.mode === 'table' && get().paging?.pageSize
+      ? get().paging!.pageSize : 100;
+
+    set({
+      isExecuting: true,
+      errorMsg: null,
+      paging: {
+        mode: 'table', schema, table,
+        orderByColumns: [], orderByDirection: 'ASC', allColumns: [],
+        filters: [], combinator: 'AND',
+        page: 1, pageSize,
+        total: null, totalIsEstimate: true, loading: true,
+        currentPageSql: '',
+      },
+    });
+
+    try {
+      // ① reltuples 估算立刻上屏 (SRE 会议: 估算先行, COUNT 慢也不白屏)
+      const est = await getRelTuplesEstimate(activeConnId, table, schema);
+      if (est !== null) {
+        set((st) => st.paging ? { paging: { ...st.paging, total: est, totalIsEstimate: true } } : {});
+      }
+      // ② PK 列 (翻页稳定排序)
+      let pk: string[] = [];
+      try {
+        pk = await getPrimaryKeyColumns(activeConnId, table, schema);
+      } catch { pk = []; } // 无权限查 PK → 走全列排序分支, 不阻塞
+
+      const p = get().paging!;
+      const req = { schema, table, filters: p.filters, combinator: p.combinator,
+                    orderByColumns: pk, orderByDirection: 'ASC' as const, page: 1, pageSize };
+
+      // ③ 精确 COUNT (替换估算)
+      const countSql = buildTableCountSql(req);
+      try {
+        const cntRes = await executeSql(activeConnId, countSql);
+        const totalVal = cntRes?.rows?.[0]?.[0]?.val;
+        const total = totalVal === null || totalVal === undefined ? null : Number(totalVal);
+        set((st) => st.paging ? { paging: { ...st.paging, total: Number.isFinite(total as number) ? total : null, totalIsEstimate: false } } : {});
+      } catch (err) {
+        // COUNT 失败 (如无权限): 分页条显示"总数不可用", 翻页仍可用 (分析师会议 #4)
+        console.warn('count failed:', err);
+        set((st) => st.paging ? { paging: { ...st.paging, total: null, totalIsEstimate: false } } : {});
+      }
+
+      // ④ 第 1 页数据
+      const pageSql = buildTablePageSql(req, p.allColumns && p.allColumns.length ? p.allColumns : undefined);
+      const res = await executeSqlWithGuard(activeConnId, pageSql, (payload) =>
+        new Promise<boolean>((resolve) => {
+          set({ pendingSafetyConfirm: { connId: activeConnId, sql: pageSql, payload, resolve } });
+        })
+      );
+      // 列清单回填 (无 PK 时全列排序用)
+      const allCols = (res?.columns || []).map((c: any) => c.name);
+      set((st) => ({
+        queryResult: res,
+        isExecuting: false,
+        paging: st.paging ? {
+          ...st.paging,
+          orderByColumns: pk,
+          allColumns: allCols,
+          currentPageSql: pageSql,
+          loading: false,
+        } : null,
+      }));
+    } catch (err: any) {
+      set((st) => ({
+        errorMsg: errToStr(err),
+        isExecuting: false,
+        paging: st.paging ? { ...st.paging, loading: false } : null,
+      }));
+    }
+  },
+
+  runQueryPaged: async (sql, pageSize) => {
+    const { activeConnId } = get();
+    if (!activeConnId) return;
+    const cur = get().paging;
+    const size = pageSize ?? (cur?.mode === 'sql' ? cur.pageSize : undefined) ?? 100;
+    const built = buildHandwrittenPaging(sql, 1, size);
+
+    if (!built.supported) {
+      // 显式告知原因后按普通模式执行 (不静默降级 — 该弹错弹错语义)
+      set({ errorMsg: null });
+      console.warn('paging not supported:', built.reason);
+      await get().runQuery(sql);
+      return;
+    }
+
+    set({
+      isExecuting: true,
+      errorMsg: null,
+      paging: {
+        mode: 'sql',
+        normalizedSql: built.normalizedSql,
+        filters: [], combinator: 'AND',
+        page: 1, pageSize: size,
+        total: null, totalIsEstimate: false, loading: true,
+        currentPageSql: built.pageSql!,
+        strippedOwnLimit: built.strippedOwnLimit,
+      },
+    });
+
+    try {
+      // COUNT (子查询包裹) — 失败不阻塞翻页
+      try {
+        const cntRes = await executeSql(activeConnId, built.countSql!);
+        const totalVal = cntRes?.rows?.[0]?.[0]?.val;
+        const total = totalVal === null || totalVal === undefined ? null : Number(totalVal);
+        set((st) => st.paging ? { paging: { ...st.paging, total: Number.isFinite(total as number) ? total : null } } : {});
+      } catch (err) {
+        console.warn('paged count failed:', err);
+      }
+      const res = await executeSqlWithGuard(activeConnId, built.pageSql!, (payload) =>
+        new Promise<boolean>((resolve) => {
+          set({ pendingSafetyConfirm: { connId: activeConnId, sql: built.pageSql!, payload, resolve } });
+        })
+      );
+      set((st) => ({
+        queryResult: res,
+        isExecuting: false,
+        paging: st.paging ? { ...st.paging, loading: false } : null,
+      }));
+    } catch (err: any) {
+      set((st) => ({
+        errorMsg: errToStr(err),
+        isExecuting: false,
+        paging: st.paging ? { ...st.paging, loading: false } : null,
+      }));
+    }
+  },
+
+  pagingGotoPage: async (page) => {
+    const { activeConnId, paging } = get();
+    if (!activeConnId || !paging || paging.loading) return;
+    const target = Math.max(1, page);
+    set((st) => st.paging ? { paging: { ...st.paging, loading: true }, isExecuting: true, errorMsg: null } : {});
+
+    try {
+      let pageSql: string;
+      if (paging.mode === 'table') {
+        pageSql = buildTablePageSql({
+          schema: paging.schema!, table: paging.table!,
+          filters: paging.filters, combinator: paging.combinator,
+          orderByColumns: paging.orderByColumns || [],
+          orderByDirection: paging.orderByDirection || 'ASC',
+          page: target, pageSize: paging.pageSize,
+        }, paging.allColumns && paging.allColumns.length ? paging.allColumns : undefined);
+      } else {
+        pageSql = buildHandwrittenPaging(paging.normalizedSql!, target, paging.pageSize).pageSql!;
+      }
+      const res = await executeSqlWithGuard(activeConnId, pageSql, (payload) =>
+        new Promise<boolean>((resolve) => {
+          set({ pendingSafetyConfirm: { connId: activeConnId, sql: pageSql, payload, resolve } });
+        })
+      );
+      set((st) => ({
+        queryResult: res,
+        isExecuting: false,
+        paging: st.paging ? { ...st.paging, page: target, currentPageSql: pageSql, loading: false } : null,
+      }));
+    } catch (err: any) {
+      set((st) => ({
+        errorMsg: errToStr(err),
+        isExecuting: false,
+        paging: st.paging ? { ...st.paging, loading: false } : null,
+      }));
+    }
+  },
+
+  pagingSetPageSize: async (size) => {
+    const { paging } = get();
+    if (!paging) return;
+    set((st) => st.paging ? { paging: { ...st.paging, pageSize: size } } : {});
+    await get().pagingGotoPage(1); // 改页大小回第 1 页
+  },
+
+  pagingSetFilters: async (filters, combinator) => {
+    const { activeConnId, paging } = get();
+    if (!activeConnId || !paging || paging.mode !== 'table') return;
+    set((st) => st.paging ? { paging: { ...st.paging, filters, combinator, loading: true }, isExecuting: true, errorMsg: null } : {});
+    try {
+      const req = {
+        schema: paging.schema!, table: paging.table!,
+        filters, combinator,
+        orderByColumns: paging.orderByColumns || [],
+        orderByDirection: paging.orderByDirection || 'ASC',
+        page: 1, pageSize: paging.pageSize,
+      };
+      // 过滤变更 → COUNT 重算 + 回第 1 页 (QA 矩阵第 5 条)
+      let total = paging.total;
+      try {
+        const cntRes = await executeSql(activeConnId, buildTableCountSql(req));
+        const v = cntRes?.rows?.[0]?.[0]?.val;
+        total = v === null || v === undefined ? null : Number(v);
+      } catch { /* 保留旧 total */ }
+      const pageSql = buildTablePageSql(req, paging.allColumns && paging.allColumns.length ? paging.allColumns : undefined);
+      const res = await executeSqlWithGuard(activeConnId, pageSql, (payload) =>
+        new Promise<boolean>((resolve) => {
+          set({ pendingSafetyConfirm: { connId: activeConnId, sql: pageSql, payload, resolve } });
+        })
+      );
+      set((st) => ({
+        queryResult: res,
+        isExecuting: false,
+        paging: st.paging ? { ...st.paging, filters, combinator, page: 1, total, totalIsEstimate: false, currentPageSql: pageSql, loading: false } : null,
+      }));
+    } catch (err: any) {
+      set((st) => ({
+        errorMsg: errToStr(err),
+        isExecuting: false,
+        paging: st.paging ? { ...st.paging, loading: false } : null,
+      }));
+    }
+  },
+
+  pagingSetOrderBy: async (columns, direction) => {
+    const { paging } = get();
+    if (!paging) return;
+    set((st) => st.paging ? { paging: { ...st.paging, orderByColumns: columns, orderByDirection: direction } } : {});
+    await get().pagingGotoPage(1);
+  },
+
+  clearPaging: () => set({ paging: null }),
 }));
 

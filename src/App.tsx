@@ -3,6 +3,8 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { explainPgError } from './utils/pgErrorHints';
 import { ShortcutsHelpModal } from './components/ShortcutsHelpModal';
+import { FilterBuilder, ColumnMetaLite } from './components/FilterBuilder';
+import { getTableColumnsMetaData } from './services/ipc';
 import { useAppStore } from './store/useAppStore';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { SqlEditor } from './components/SqlEditor';
@@ -64,7 +66,12 @@ export const App: React.FC = () => {
     aiConfig,
     setAiConfig,
     pendingSafetyConfirm,
-    resolveSafetyConfirm
+    resolveSafetyConfirm,
+    paging,
+    browseTable,
+    runQueryPaged,
+    pagingSetFilters,
+    clearPaging
   } = useAppStore();
 
   const [inWorkspace, setInWorkspace] = useState(false);
@@ -77,6 +84,9 @@ export const App: React.FC = () => {
   const [isCliConsoleOpen, setIsCliConsoleOpen] = useState(false);
   // WP9-P2-9: 快捷键与功能速查表
   const [isShortcutsHelpOpen, setIsShortcutsHelpOpen] = useState(false);
+  // WP10: 过滤构建器 (浏览表模式)
+  const [isFilterBuilderOpen, setIsFilterBuilderOpen] = useState(false);
+  const [browseColumns, setBrowseColumns] = useState<ColumnMetaLite[]>([]);
   const [tempAiConfig, setTempAiConfig] = useState(aiConfig);
 
   // New Management Modals State
@@ -96,6 +106,7 @@ export const App: React.FC = () => {
   // WP9-P1-1: 全局快捷键 (抽取为可测 hook: Esc 关最上层弹窗 / Cmd+B 切 AI 侧栏 / Cmd+R 执行 SQL)
   useGlobalShortcuts({
     modals: [
+      { isOpen: isFilterBuilderOpen, close: () => setIsFilterBuilderOpen(false) },
       { isOpen: isShortcutsHelpOpen, close: () => setIsShortcutsHelpOpen(false) },
       { isOpen: isUserMgmtOpen, close: () => setIsUserMgmtOpen(false) },
       { isOpen: isProcessModalOpen, close: () => setIsProcessModalOpen(false) },
@@ -108,6 +119,14 @@ export const App: React.FC = () => {
     ],
     onExecute: (selectedSql?: string) => handleExecuteRef.current?.(selectedSql),
     onToggleAiSidebar: () => setIsAiSidebarOpen((v) => !v),
+    // WP10: Cmd+←/→ 翻页 (分页模式且非加载态才处理; 返回 false 让 hook 不 preventDefault)
+    onPage: (delta) => {
+      const p = useAppStore.getState().paging;
+      if (!p || p.loading) return false;
+      const goto = useAppStore.getState().pagingGotoPage;
+      goto(Math.max(1, p.page + delta));
+      return true;
+    },
   });
 
   // ref 同步: 每次 render 指向最新 handleExecute (定义在其下方, 但 effect 在 render 后执行故安全)
@@ -249,9 +268,20 @@ export const App: React.FC = () => {
       // 只有一条语句：按单查询流程执行并直接刷新主 DataGrid (runQuery 内部已带 guard)
       setResultTabs([]);
       setActiveResultTabId('');
-      runQuery(sqlStatements[0]);
+      // WP10-D2 (用户拍板): 手写单条 SELECT 也自动分页 —
+      // buildHandwrittenPaging 判定支持则走分页通道 (COUNT+LIMIT/OFFSET);
+      // 不支持 (写操作/多语句/FOR UPDATE) 内部自动回退 runQuery, 原因已 console 明示
+      const stmt = sqlStatements[0];
+      const head = stmt.trim().toUpperCase();
+      if (head.startsWith('SELECT') || head.startsWith('WITH')) {
+        runQueryPaged(stmt);
+      } else {
+        clearPaging(); // 写操作退出分页模式
+        runQuery(stmt);
+      }
     } else {
       // 包含多条语句：逐条拆分执行并构建 Result Tabs 选项卡
+      clearPaging(); // WP10: 多语句不分页, 退出分页模式
       useAppStore.setState({ isExecuting: true, errorMsg: null });
       const newTabs: import('./types').QueryResultTabItem[] = [];
 
@@ -657,12 +687,20 @@ export const App: React.FC = () => {
               selectedTable={designerTable}
               onSelectTable={(tbl) => {
                 setDesignerTable(tbl);
-                // WP4 步骤5: 表名过 quoteIdentifier; schema.table 形式分段引用
-                const q = tbl.includes('.')
-                  ? tbl.split('.').map((seg) => quoteIdentifier(seg)).join('.')
-                  : quoteIdentifier(tbl);
-                setSqlText(`SELECT * FROM ${q} LIMIT 100;`);
-                runQuery(`SELECT * FROM ${q} LIMIT 100;`);
+                // WP10: 单击表 → 浏览表模式 (估算→COUNT→第1页, 翻页自动发 SQL)
+                const [schema, table] = tbl.includes('.')
+                  ? [tbl.split('.')[0], tbl.split('.').slice(1).join('.')]
+                  : ['public', tbl];
+                setSqlText(`SELECT * FROM ${tbl.includes('.') ? tbl.split('.').map((seg) => quoteIdentifier(seg)).join('.') : quoteIdentifier(tbl)} LIMIT 100;`);
+                browseTable(schema, table);
+                // 列元数据异步带出 (FilterBuilder 列名下拉用)
+                getTableColumnsMetaData(activeConnId || '', table, schema)
+                  .then((cols) => setBrowseColumns((cols || []).map((c: any) => ({
+                    column_name: c.column_name ?? String(c[0]?.val ?? ''),
+                    data_type: c.data_type ?? String(c[1]?.val ?? ''),
+                    column_comment: c.column_comment ?? (c[3]?.val ?? null),
+                  }))))
+                  .catch(() => setBrowseColumns([])); // 元数据失败 → FilterBuilder 内明示, 不假数据
               }}
               onDesignTable={(tbl) => {
                 setDesignerTable(tbl);
@@ -727,6 +765,7 @@ export const App: React.FC = () => {
                     }}
                     isExecuting={isExecuting}
                     tableName={designerTable || 'table'}
+                    onOpenFilter={() => setIsFilterBuilderOpen(true)}
                     onCommitChanges={async ({ edits, addedRows, deletedRowIndices }) => {
                       if (!queryResult || !activeConnId) return;
 
@@ -1055,6 +1094,18 @@ export const App: React.FC = () => {
       )}
       {/* WP9-P2-9: 快捷键与功能速查表 */}
       <ShortcutsHelpModal isOpen={isShortcutsHelpOpen} onClose={() => setIsShortcutsHelpOpen(false)} />
+
+      {/* WP10: 可视化过滤构建器 (浏览表模式, 列名自动带出) */}
+      {paging?.mode === 'table' && (
+        <FilterBuilder
+          isOpen={isFilterBuilderOpen}
+          onClose={() => setIsFilterBuilderOpen(false)}
+          columns={browseColumns}
+          initialFilters={paging.filters}
+          initialCombinator={paging.combinator}
+          onApply={(filters, combinator) => { pagingSetFilters(filters, combinator); }}
+        />
+      )}
     </div>
   );
 };

@@ -331,6 +331,34 @@ export async function vaultMigrateFromLocalStorage(
   });
 }
 
+/** WP10-S2: 主键列 (翻页稳定排序用) — 纯 SELECT 元数据查询 */
+export async function getPrimaryKeyColumns(
+  connId: string,
+  tableName: string,
+  schemaName: string = 'public'
+): Promise<string[]> {
+  const { buildPrimaryKeySql } = await import('../utils/browseSqlBuilder');
+  const sql = buildPrimaryKeySql(schemaName, tableName);
+  const res = await executeSql(connId, sql);
+  return (res?.rows || []).map((r: any[]) => String(r[0]?.val ?? ''));
+}
 
-
-
+/** WP10-S2: pg_class.reltuples 行数估算 — 立即显示"约 N 行", 精确 COUNT 后替换 */
+export async function getRelTuplesEstimate(
+  connId: string,
+  tableName: string,
+  schemaName: string = 'public'
+): Promise<number | null> {
+  const { buildRelTuplesSql } = await import('../utils/browseSqlBuilder');
+  const sql = buildRelTuplesSql(schemaName, tableName);
+  try {
+    const res = await executeSql(connId, sql);
+    const v = res?.rows?.[0]?.[0]?.val;
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    // reltuples = -1 表示从未 ANALYZE (PG14+), 视为不可用
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    return null; // 估算失败静默降级 — 精确 COUNT 仍是主通道 (非关键路径)
+  }
+}

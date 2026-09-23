@@ -5,6 +5,8 @@ import { RowDetailDrawer } from './RowDetailDrawer';
 import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
 import { errToStr } from '../services/ipc';
 import { explainPgError } from '../utils/pgErrorHints';
+import { PaginationBar } from './PaginationBar';
+import { useAppStore } from '../store/useAppStore';
 import { showAlert } from '../services/appDialog';
 
 /** WP9-P1-6: 大结果集渲染上限 — 超过只渲染前 N 行并横幅警示 (数据仍全量在内存, 导出不受影响) */
@@ -13,6 +15,8 @@ const MAX_RENDER_ROWS = 2000;
 interface DataGridProps {
   /** WP9-P1-7: 查询失败错误 (与 result=null 区分"未执行/0行/失败"三态) */
   error?: string | null;
+  /** WP10: 打开过滤构建器 (FilterBuilder 挂在 App 层, 此处只是入口按钮) */
+  onOpenFilter?: () => void;
   result: QueryResult | null;
   resultTabs?: QueryResultTabItem[];
   activeTabId?: string;
@@ -34,7 +38,8 @@ export const DataGrid: React.FC<DataGridProps> = ({
   onSelectTab,
   isExecuting,
   tableName,
-  onCommitChanges
+  onCommitChanges,
+  onOpenFilter
 }) => {
   // 暂存修改区: { "rowIndex_colName": "newValue" } (rowIndex < originalLength 表示修改原行，>= originalLength 表示新增行)
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -45,6 +50,8 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
   // WP9-P2-1: 列头快速筛选 { colName: 子串 } — 仅过滤已加载行 (明示范围, 不改 SQL)
   const [colFilters, setColFilters] = useState<Record<string, string>>({});
+  // WP10: 分页状态 (store 单一来源; null = 非分页模式)
+  const paging = useAppStore((st) => st.paging);
 
   // 标记待删除行索引集合
   const [pendingDeletions, setPendingDeletions] = useState<Set<number>>(new Set());
@@ -452,6 +459,19 @@ export const DataGrid: React.FC<DataGridProps> = ({
           >
             <Plus className="w-3.5 h-3.5" /> 增加行
           </button>
+
+          {/* WP10: 服务端过滤构建器入口 (浏览表模式) */}
+          {paging?.mode === 'table' && onOpenFilter && (
+            <button
+              onClick={onOpenFilter}
+              className="px-2.5 py-1 bg-[#1a1d26] hover:bg-[#222733] text-slate-300 rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors border border-[#272d3b]"
+              title="可视化过滤 (服务端 WHERE, 列名自动带出)"
+              data-testid="open-filter-builder"
+            >
+              <Filter className="w-3.5 h-3.5 text-purple-400" />
+              过滤{(paging.filters?.length ?? 0) > 0 ? ` (${paging.filters.length})` : ''}
+            </button>
+          )}
 
           {/* WP9-P2-7: 粘贴多行 TSV 造数 (QA/开发批量造测试数据) */}
           {!result.is_read_only && (
@@ -888,6 +908,11 @@ export const DataGrid: React.FC<DataGridProps> = ({
             </div>
           )}
         </div>
+      )}
+
+      {/* WP10: 分页条 (浏览表模式 / 手写 SQL 分页模式且只读时显示) */}
+      {paging && result.is_read_only && (
+        <PaginationBar paging={paging} currentRowCount={result.rows.length} />
       )}
 
       {/* Row Detail Drawer Side Panel */}

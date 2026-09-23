@@ -24,6 +24,8 @@ export interface GlobalShortcutsOptions {
   onExecute: (selectedSql?: string) => void;
   /** 切换 AI 侧栏 */
   onToggleAiSidebar: () => void;
+  /** WP10: 分页翻页 (delta = -1 上一页 / +1 下一页); 未提供或返回 false 表示当前不分页 */
+  onPage?: (delta: number) => boolean | void;
 }
 
 export function useGlobalShortcuts(opts: GlobalShortcutsOptions): void {
@@ -51,6 +53,19 @@ export function useGlobalShortcuts(opts: GlobalShortcutsOptions): void {
       if (mod && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         ref.current.onToggleAiSidebar();
+        return;
+      }
+
+      // WP10: Cmd+← / Cmd+→ 翻页 (焦点在 Monaco 内时让行编辑器光标移动)
+      if (mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        const inMonaco = !!(document.activeElement as Element | null)?.closest?.('.monaco-editor');
+        if (inMonaco) return;
+        const inInput = ['input', 'textarea', 'select'].includes(
+          ((document.activeElement as Element | null)?.tagName || '').toLowerCase()
+        );
+        if (inInput) return; // 输入框内左右键移动光标
+        const handled = ref.current.onPage?.(e.key === 'ArrowLeft' ? -1 : 1);
+        if (handled !== false) e.preventDefault();
         return;
       }
 
