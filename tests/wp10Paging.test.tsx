@@ -94,6 +94,7 @@ beforeEach(() => {
     return Promise.resolve(null);
   });
   useAppStore.setState({ activeConnId: 'ux-demo-conn', queryResult: null, errorMsg: null, paging: null } as any);
+  localStorage.clear(); // WP10-S6: 偏好持久化跨测试隔离
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
@@ -385,5 +386,38 @@ describe('WP10: FilterBuilder 组件 (列自动带出 + 类型感知)', () => {
     await waitFor(() => expect(screen.getByTestId('filter-builder')).toBeTruthy());
     expect(consoleErrors.filter((e) => /fewer hooks|more hooks|#310/.test(e))).toEqual([]);
     console.error = origError;
+  });
+});
+
+describe('WP10-S6: 浏览偏好持久化 (conn+table 记忆)', () => {
+  beforeEach(() => { localStorage.clear(); });
+
+  it('pagingSetFilters 后偏好写入 localStorage; 重新 browseTable 恢复过滤器', async () => {
+    await act(async () => { await useAppStore.getState().browseTable('shop', 'orders'); });
+    await act(async () => {
+      await useAppStore.getState().pagingSetFilters(
+        [{ column: 'status', operator: '=', value: 'cancelled' }], 'AND'
+      );
+    });
+    const raw = localStorage.getItem('aidb_browse_prefs');
+    expect(raw).toBeTruthy();
+    const prefs = JSON.parse(raw!);
+    const key = 'ux-demo-conn|shop|orders';
+    expect(prefs[key].filters).toEqual([{ column: 'status', operator: '=', value: 'cancelled' }]);
+
+    // 退出后重进同表 → 过滤器恢复 (COUNT/页 SQL 带 WHERE)
+    useAppStore.setState({ paging: null } as any);
+    executedSqls.length = 0;
+    await act(async () => { await useAppStore.getState().browseTable('shop', 'orders'); });
+    const pageSql = executedSqls.find((q) => q.startsWith('SELECT * FROM "shop"."orders"'));
+    expect(pageSql).toContain(`WHERE "status" = 'cancelled'`);
+    expect(useAppStore.getState().paging!.filters.length).toBe(1);
+  });
+
+  it('pagingSetPageSize 记忆页大小', async () => {
+    await act(async () => { await useAppStore.getState().browseTable('shop', 'orders'); });
+    await act(async () => { await useAppStore.getState().pagingSetPageSize(200); });
+    const prefs = JSON.parse(localStorage.getItem('aidb_browse_prefs')!);
+    expect(prefs['ux-demo-conn|shop|orders'].pageSize).toBe(200);
   });
 });

@@ -24,6 +24,27 @@ import {
   buildHandwrittenPaging,
 } from '../utils/browseSqlBuilder';
 
+// WP10-S6: 浏览偏好持久化 (按 conn+table 记忆过滤器/组合/页大小 — 全栈会议 #2)
+const BROWSE_PREFS_KEY = 'aidb_browse_prefs';
+export interface BrowsePrefs {
+  filters?: BrowseFilter[];
+  combinator?: FilterCombinator;
+  pageSize?: number;
+}
+function loadBrowsePrefs(connId: string, schema: string, table: string): BrowsePrefs {
+  try {
+    const all = JSON.parse(localStorage.getItem(BROWSE_PREFS_KEY) || '{}');
+    return all[`${connId}|${schema}|${table}`] || {};
+  } catch { return {}; }
+}
+function saveBrowsePrefs(connId: string, schema: string, table: string, prefs: BrowsePrefs): void {
+  try {
+    const all = JSON.parse(localStorage.getItem(BROWSE_PREFS_KEY) || '{}');
+    all[`${connId}|${schema}|${table}`] = prefs;
+    localStorage.setItem(BROWSE_PREFS_KEY, JSON.stringify(all));
+  } catch { /* 存储满/隐私模式 — 偏好丢失不阻塞功能 */ }
+}
+
 /** WP1: 待确认的 Critical SQL (全局确认对话框状态) */
 export interface PendingSafetyConfirm {
   connId: string;
@@ -313,8 +334,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   browseTable: async (schema, table) => {
     const { activeConnId } = get();
     if (!activeConnId) return;
-    const pageSize = get().paging?.mode === 'table' && get().paging?.pageSize
-      ? get().paging!.pageSize : 100;
+    // WP10-S6: 恢复该 conn+table 的浏览偏好 (过滤器/组合/页大小)
+    const prefs = loadBrowsePrefs(activeConnId, schema, table);
+    const pageSize = prefs.pageSize ?? (get().paging?.mode === 'table' && get().paging?.pageSize
+      ? get().paging!.pageSize : 100);
+    const restoredFilters = prefs.filters ?? [];
+    const restoredCombinator = prefs.combinator ?? 'AND';
 
     set({
       isExecuting: true,
@@ -322,7 +347,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       paging: {
         mode: 'table', schema, table,
         orderByColumns: [], orderByDirection: 'ASC', allColumns: [],
-        filters: [], combinator: 'AND',
+        filters: restoredFilters, combinator: restoredCombinator,
         page: 1, pageSize,
         total: null, totalIsEstimate: true, loading: true,
         currentPageSql: '',
@@ -484,9 +509,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   pagingSetPageSize: async (size) => {
-    const { paging } = get();
+    const { paging, activeConnId } = get();
     if (!paging) return;
     set((st) => st.paging ? { paging: { ...st.paging, pageSize: size } } : {});
+    // WP10-S6: table 模式记忆页大小
+    if (paging.mode === 'table' && activeConnId) {
+      saveBrowsePrefs(activeConnId, paging.schema!, paging.table!, {
+        filters: paging.filters, combinator: paging.combinator, pageSize: size,
+      });
+    }
     await get().pagingGotoPage(1); // 改页大小回第 1 页
   },
 
@@ -515,6 +546,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           set({ pendingSafetyConfirm: { connId: activeConnId, sql: pageSql, payload, resolve } });
         })
       );
+      // WP10-S6: 记忆该表过滤偏好
+      const pp = get().paging;
+      if (pp?.mode === 'table') {
+        saveBrowsePrefs(activeConnId, pp.schema!, pp.table!, { filters, combinator, pageSize: pp.pageSize });
+      }
       set((st) => ({
         queryResult: res,
         isExecuting: false,
