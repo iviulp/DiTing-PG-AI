@@ -5,10 +5,6 @@ description = "AIDB Desk - AI-Powered Database Client"
 authors = ["AIDB Dev Team"]
 edition = "2021"
 
-[lib]
-name = "aidb_desk_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -33,16 +29,20 @@ sqlx = { version = "0.8", features = [
     "json",
     "bigdecimal"
 ] }
+bigdecimal = "0.4"
 
-# AI Agent Framework (Rig & HTTP Client)
-rig-core = "0.7"
+# AI Agent Framework (HTTP Client, OpenAI-compatible; rig-core 已按 WP2 会议9决议移除——声明未用, 直连更可控)
 reqwest = { version = "0.12", features = ["json", "stream"] }
+base64 = "0.22"
 
 # Security & Encryption Vault
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
 zeroize = { version = "1.8", features = ["derive"] }
+hkdf = "0.12"
+sha2 = "0.10"
+keyring = { version = "3", features = ["apple-native"] }
 secrecy = "0.8"
 
 # SQL Parsing & Safety AST Inspector
@@ -57,3 +57,20 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 encoding_rs = "0.8"
 urlencoding = "2.1"
 
+# WP3: SSH 隧道 (纯 Rust, tokio 原生; 选型见 docs/plans/WP3-ssh-tunnel.md 会议1)
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+dirs = "7"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+
+# WP7: Xcode 27 beta ld (ld-27037) 对 release 优化的 proc-macro dylib 产生
+# "mis-aligned LINKEDIT string pool" 导致 dlopen 失败 (sqlx_macros)。
+# build-override 让 build-deps/proc-macro 以 dev 等效方式链接, 规避该工具链 bug;
+# 最终二进制仍为完整 release 优化。待 Xcode 正式版修复后可移除。
+[profile.release.build-override]
+opt-level = 0
+debug = false
+strip = "none"

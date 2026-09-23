@@ -37,7 +37,9 @@
 | **AI 深度整合** | 无或仅为粗糙的 Webview 网页问答 | **物理元数据实时探查 + 意图路由 + 自然语言直出 SQL** |
 | **命令行交互 (CLI)** | 依赖本地是否装有 `psql` 环境 | **100% 离线内置原生 psql 模拟器，零依赖免装环境** |
 | **安全性 & 权限治理** | 权限修改黑盒，容易误操作 | **PostgreSQL 细粒度表级 ACL 矩阵 + 生产红线防护** |
-| **配置漫游与迁移** | 明文保存连接密码，迁移困难 | **Argon2id + AES-256-GCM 强加密 `.ditingvault` 备份** |
+| **配置漫游与迁移** | 明文保存连接密码，迁移困难 | **本机 Keychain/KEK 加密存储 + 主密码 `.ditingvault` v2 备份** |
+| **SQL 安全防护** | 高危语句直接执行，误删库表常见 | **AST 三级风险分级 + 生产红线拦截 + Critical 二次确认** |
+| **内网穿透** | 需自备 ssh 命令行隧道 | **内置原生 SSH 隧道 (russh)：单跳/堡垒机双跳 + TOTP 动态口令** |
 
 ---
 
@@ -71,9 +73,33 @@
 - 实时探查 `pg_stat_activity`，直观展示活跃连接、慢查询耗时、客户端 IP 与执行状态。
 - 支持一键安全终止（`pg_terminate_backend`）阻断进程或死锁事务。
 
-### 6. 🔐 军工级加密数据备份与迁移 (.ditingvault)
-- 支持将全量连接配置、AI Provider 密钥、已存 SQL 脚本库一键导出为 `.ditingvault` 加密备份包。
-- 采用 **Argon2id 密钥派生 + AES-256-GCM 强加密**，换电脑一键恢复，安全无忧。
+### 6. 🚦 SQL 安全管道 (AST Safety Pipeline)
+- **AST 级风险分级**：基于 sqlparser 对每条 SQL 做语法树分析，自动分为 `Safe / Caution / Critical` 三级。
+- **生产红线防护**：只读连接下写操作被硬拦截（`force` 参数无法豁免 read_only）。
+- **Critical 二次确认**：`DROP TABLE / TRUNCATE / DELETE 无 WHERE` 等高危语句需显式确认后方可执行，编辑器与 CLI 控制台行为一致。
+
+### 7. 🌐 内置原生 SSH 隧道 (russh)
+- **零依赖穿透**：无需本机安装 openssh，纯 Rust 实现 direct 单跳与堡垒机双跳（bastion jump）端口转发。
+- **三种认证方式**：密码、私钥（含 passphrase）、TOTP 动态口令（keyboard-interactive 自动应答）。
+- **TOFU 主机密钥信任**：首次连接记录指纹，后续变更硬失败并提示（防中间人攻击）。
+
+### 8. 🔐 本机加密凭证存储与主密码备份
+- **自动加密迁移**：首次启动自动将旧版 localStorage 明文连接配置吸入后端加密存储
+  `~/.aidb/connections.enc`（macOS Keychain / KEK 文件派生 + HKDF 用途隔离 + AES-256-GCM，0600 权限），迁移成功才清明文。
+- **`.ditingvault` v2 备份**：导出时设置 ≥8 位主密码（Argon2id 派生 + HKDF + AES-256-GCM），
+  换电脑一键恢复；主密码不可找回，旧 v1 备份仍可导入（带风险告知）并建议立即重导出。
+- **API Key 零明文暴露**：AI 密钥加密落盘，前端仅接收脱敏视图（`has_key` + 尾 4 位）。
+
+### 9. 🎯 类型保真与 SSL 接入
+- **真实类型渲染**：MySQL / SQLite 查询结果不再全列降级为字符串——数字、布尔、JSON、二进制
+  （hex 截断展示）按 17 种 TypePlan 精确还原；真 `NULL` 与字符串 `"NULL"` 可区分。
+- **SSL 生效**：PostgreSQL / MySQL 连接的 `ssl_mode` 真正接入驱动层；远程主机默认 `require`，
+  本机回环默认 `disable`（向后兼容）。
+
+### 10. 💬 AI 多轮对话与流式输出
+- **会话级多轮历史**：对话上下文随请求传递，token 预算自动截断早期历史。
+- **SSE 流式逐字渲染**：基于 Tauri 2.0 Channel 的 delta 推送，失败自动降级同步模式。
+- **OpenAI 兼容直连**：任意兼容 `/chat/completions` 的服务端均可接入。
 
 ---
 

@@ -12,12 +12,14 @@ import {
   Layers,
   Sparkles
 } from 'lucide-react';
+import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
+import type { DbValue } from '../types';
 
 export interface RowDetailDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   columns: Array<{ name: string; data_type: string }>;
-  rowData: Array<{ val: any }>;
+  rowData: Array<DbValue>;
   rowIndex: number;
   tableName?: string;
   onCellEdit?: (colName: string, newValue: string) => void;
@@ -191,9 +193,10 @@ export const RowDetailDrawer: React.FC<RowDetailDrawerProps> = ({
       {/* 2. Main Scrollable List of All Fields */}
       <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-[#101115]">
         {columns.map((col, idx) => {
-          const rawCellVal = rowData && rowData[idx] ? rowData[idx].val : '';
-          const cellValStr = rawCellVal === null || rawCellVal === undefined ? 'NULL' : String(rawCellVal);
-          const isNull = cellValStr === 'NULL';
+          const cell = rowData && rowData[idx] ? rowData[idx] : null;
+          // WP5: 统一 formatDbValue 渲染 (BytesHex 全量, Null tag 级判定; 'NULL' 字符串值不再误判)
+          const cellValStr = cell === null ? 'NULL' : formatDbValue(cell, { full: true });
+          const isNull = isDbValueNull(cell);
           const isLongText = cellValStr.length > 60 || cellValStr.includes('\n');
           const isEditingThis = editingColName === col.name;
           const activeTab = fieldTabs[col.name] || 'preview';

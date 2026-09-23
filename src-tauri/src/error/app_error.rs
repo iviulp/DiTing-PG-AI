@@ -1,7 +1,7 @@
-/// AIDB Desk 统一错误处理模块
-///
-/// 封装后端 Rust Engine 所有的强类型错误分支，包含数据库驱动异常、
-/// 安全 Vault 加解密失败、Rig AI Agent 工具调用故障及网络/IO 错误。
+//! AIDB Desk 统一错误处理模块
+//!
+//! 封装后端 Rust Engine 所有的强类型错误分支，包含数据库驱动异常、
+//! 安全 Vault 加解密失败、Rig AI Agent 工具调用故障及网络/IO 错误。
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -27,6 +27,15 @@ pub enum AppError {
     #[error("SQL Safety Check Blocked: {0}")]
     SafetyBlocked(String),
 
+    /// Critical 级高危 SQL 需用户二次确认 (WP1: 结构化风险信息随 DTO 下发前端)
+    #[error("{message}")]
+    SafetyCritical {
+        message: String,
+        risk_level: String,
+        requires_confirmation: bool,
+        reasons: Vec<String>,
+    },
+
     /// IO、文件或配置解析错误
     #[error("IO/System error: {0}")]
     Io(String),
@@ -38,6 +47,23 @@ pub enum AppError {
     /// 内部通用错误或加解密异常
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// WP3: SSH 隧道错误 (错误码冻结清单见 docs/plans/WP3-ssh-tunnel.md 附录)
+    #[error("{code}: {message}")]
+    Tunnel {
+        code: String,
+        message: String,
+    },
+}
+
+impl AppError {
+    /// WP3: 构造隧道错误的便捷方法
+    pub fn tunnel(code: &str, message: impl Into<String>) -> Self {
+        AppError::Tunnel {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
 }
 
 /// 导出给 Tauri IPC 前端的序列化错误 DTO
@@ -45,6 +71,13 @@ pub enum AppError {
 pub struct AppErrorDto {
     pub code: String,
     pub message: String,
+    /// WP1: Critical 级风险信息 (仅 SAFETY_BLOCKED 且需确认时下发)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_confirmation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasons: Option<Vec<String>>,
 }
 
 impl AppError {
@@ -54,30 +87,70 @@ impl AppError {
             AppError::Database(msg) => AppErrorDto {
                 code: "DATABASE_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::Auth(msg) => AppErrorDto {
                 code: "AUTH_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::Ai(msg) => AppErrorDto {
                 code: "AI_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::SafetyBlocked(msg) => AppErrorDto {
                 code: "SAFETY_BLOCKED".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
+            },
+            AppError::SafetyCritical {
+                message,
+                risk_level,
+                requires_confirmation,
+                reasons,
+            } => AppErrorDto {
+                code: "SAFETY_BLOCKED".into(),
+                message: message.clone(),
+                risk_level: Some(risk_level.clone()),
+                requires_confirmation: Some(*requires_confirmation),
+                reasons: Some(reasons.clone()),
             },
             AppError::Io(msg) => AppErrorDto {
                 code: "IO_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::ConnectionNotFound(msg) => AppErrorDto {
                 code: "CONN_NOT_FOUND".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
             AppError::Internal(msg) => AppErrorDto {
                 code: "INTERNAL_ERROR".into(),
                 message: msg.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
+            },
+            AppError::Tunnel { code, message } => AppErrorDto {
+                code: code.clone(),
+                message: message.clone(),
+                risk_level: None,
+                requires_confirmation: None,
+                reasons: None,
             },
         }
     }

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import * as monaco from 'monaco-editor';
 import { loader } from '@monaco-editor/react';
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
 
 // 强制配置 Monaco Editor 使用本地捆绑的离线模块，严禁从 jsdelivr/cloudflare 等外网 CDN 加载
@@ -32,6 +33,9 @@ if (import.meta.env.PROD || !window.location.href.includes('debug=true')) {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    {/* WP8-S2: 全局错误边界 — 无 Boundary 时任一渲染期异常导致整树 unmount = 全窗黑屏 */}
+    <ErrorBoundary name="应用主体">
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

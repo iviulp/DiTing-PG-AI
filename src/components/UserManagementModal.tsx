@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { Shield, UserPlus, CheckCircle2, KeyRound, Users, RefreshCw, Trash2, User } from 'lucide-react';
-import { executeSql } from '../services/ipc';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Shield, UserPlus, CheckCircle2, KeyRound, Users, RefreshCw, Trash2, User, Search } from 'lucide-react';
+import { executeSql, executeSqlWithGuard, errToStr } from '../services/ipc';
+import { tryEscapeSqlLiteral, sanitizeIdentifier } from '../utils/sqlEscape';
+import { useAppConfirm, InlineBanner, BannerState } from './AppConfirmDialog';
+import { ErrorBoundary } from './ErrorBoundary';
 
 interface DbUser {
   username: string;
@@ -43,6 +46,17 @@ interface UserManagementModalProps {
   onClose: () => void;
 }
 
+/** WP8-S6: 角色名/字面量安全化 — 失败返回 null (调用方必须拒绝拼接执行, 不静默兜底) */
+const safeLiteral = (v: string): string | null => tryEscapeSqlLiteral(v);
+/** WP8-S6: 标识符安全化 ("→""); 失败返回 null */
+const safeIdent = (v: string): string | null => {
+  try {
+    return sanitizeIdentifier(v);
+  } catch {
+    return null;
+  }
+};
+
 /**
  * 谛听 (DiTing Desk) PostgreSQL 工业级用户与表级权限管理中心 (PostgreSQL Role, Schema & Table-Level Privilege Manager)
  * 遵循 PostgreSQL 官方 ACL 规范与顶级 DBA 运维准则：
@@ -82,6 +96,71 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
   const [isFetchingPrivileges, setIsFetchingPrivileges] = useState(false);
 
+  // WP8-S4: alert/confirm 在 Tauri WKWebView 是 no-op → 应用内横幅 + Promise 化对话框
+  const [banner, setBanner] = useState<BannerState | null>(null);
+  const { confirm: appConfirm, dialogElement: confirmDialog } = useAppConfirm();
+
+  // WP9-P0: 左侧用户面板可拖拽调宽 + 搜索过滤 (用户点名痛点: 固定 w-64 不可拉宽, 长角色名显示不全)
+  const [userPanelWidth, setUserPanelWidth] = useState(256);
+  const [userSearch, setUserSearch] = useState('');
+  // WP9-P2-3: 属性筛选 chips (全部 / SUPERUSER / 可登录)
+  const [userAttrFilter, setUserAttrFilter] = useState<'all' | 'superuser' | 'login'>('all');
+  // WP9-P2-2: 本次会话权限变更历史 (审计回溯: 时间+SQL+结果), 可导出
+  const [changeHistory, setChangeHistory] = useState<
+    Array<{ at: string; sql: string; ok: boolean; error?: string }>
+  >([]);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const recordChange = (sql: string, ok: boolean, error?: string) => {
+    setChangeHistory((prev) => [
+      ...prev,
+      { at: new Date().toLocaleTimeString('zh-CN', { hour12: false }), sql, ok, error },
+    ]);
+  };
+  const resizingRef = React.useRef(false);
+  const panelRef = React.useRef<HTMLDivElement | null>(null);
+
+  // 拖拽分隔条: mousedown 启动, document mousemove 调宽, mouseup 结束
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!resizingRef.current || !panelRef.current) return;
+      const rect = panelRef.current.getBoundingClientRect();
+      const next = e.clientX - rect.left;
+      // 约束: 最小 160px (够显示头像+图标), 最大 480px (不挤占右侧权限矩阵)
+      setUserPanelWidth(Math.max(160, Math.min(480, Math.round(next))));
+    };
+    const onUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  // 搜索 + 属性过滤后的用户列表 (WP9-P2-3: 大小写不敏感子串匹配 + SUPERUSER/可登录 chips)
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    return users.filter((u) => {
+      if (q && !u.username.toLowerCase().includes(q)) return false;
+      if (userAttrFilter === 'superuser' && !u.isSuperuser) return false;
+      if (userAttrFilter === 'login' && !u.canLogin) return false;
+      return true;
+    });
+  }, [users, userSearch, userAttrFilter]);
+
   const handleSelectUser = (u: DbUser) => {
     selectedUserRef.current = u.username;
     setSelectedUser(u);
@@ -99,6 +178,12 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
    */
   const fetchRealPrivileges = async (username: string) => {
     if (!connId || !username) return;
+    // WP8-S6: 角色名含非法字符 (控制字符等) 时拒绝探查并显式报错, 不静默兜底
+    const unameLit = safeLiteral(username);
+    if (unameLit === null) {
+      setBanner({ kind: 'error', text: `角色名 "${username}" 含非法字符, 已拒绝执行权限探查 SQL` });
+      return;
+    }
     setIsFetchingPrivileges(true);
 
     try {
@@ -115,7 +200,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
           END AS is_system
         FROM pg_namespace n
         CROSS JOIN pg_roles r
-        WHERE r.rolname = '${username}' 
+        WHERE r.rolname = '${unameLit}' 
           AND n.nspname NOT LIKE 'pg_temp_%' 
           AND n.nspname NOT LIKE 'pg_toast_%'
         ORDER BY 
@@ -138,7 +223,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
           (r.rolsuper OR has_table_privilege(r.rolname, format('%I.%I', c.table_schema, c.table_name), 'TRIGGER')) AS can_trigger
         FROM information_schema.tables c
         CROSS JOIN pg_roles r
-        WHERE r.rolname = '${username}'
+        WHERE r.rolname = '${unameLit}'
           AND c.table_schema NOT IN ('information_schema', 'pg_catalog')
           AND c.table_schema NOT LIKE 'pg_%'
         ORDER BY c.table_schema ASC, c.table_name ASC;
@@ -229,7 +314,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
       }
     } catch (err: any) {
       console.error('Failed to probe PostgreSQL privileges:', err);
-      alert(`⚠️ 探查用户 "${username}" 权限失败：\n${err.message || String(err)}`);
+      setBanner({ kind: 'error', text: `探查用户 "${username}" 权限失败：${errToStr(err)}` });
     } finally {
       setIsFetchingPrivileges(false);
     }
@@ -275,7 +360,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
       }
     } catch (err: any) {
       console.error('Failed to fetch db users:', err);
-      alert(`⚠️ 加载数据库用户列表失败：\n${err.message || String(err)}`);
+      setBanner({ kind: 'error', text: `加载数据库用户列表失败：${errToStr(err)}` });
     }
   };
 
@@ -283,29 +368,73 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     if (isOpen && connId) reloadUsers();
   }, [isOpen, connId]);
 
-  if (!isOpen) return null;
+  // WP8-H1 实锤修复: 原先此处有 `if (!isOpen) return null;` 早返回,
+  // 但其后仍有 useState(resetPwdUser/resetPassword/isApplying) 与 useMemo(sqlStatementsMemo)。
+  // 组件常驻挂载, isOpen false→true 时 hooks 数量不一致 → React #310 抛异常;
+  // 修复前无 ErrorBoundary 时整树卸载 = 用户看到的"黑屏"。
+  // Hooks 规则: 所有 hooks 必须无条件执行, 早返回只能放在全部 hooks 之后。
 
   const handleAddUser = async () => {
     if (!newUsername) return;
+    // WP8-S6: 标识符/密码字面量全部安全化; 非法即拒绝并显式报错
+    const ident = safeIdent(newUsername);
+    if (ident === null) {
+      setBanner({ kind: 'error', text: `用户名 "${newUsername}" 含非法字符或超 63 字节, 已拒绝创建` });
+      return;
+    }
+    let pwdSql = '';
+    if (newPassword) {
+      const pwdLit = safeLiteral(newPassword);
+      if (pwdLit === null) {
+        setBanner({ kind: 'error', text: '密码含非法控制字符, 已拒绝创建' });
+        return;
+      }
+      pwdSql = `PASSWORD '${pwdLit}'`;
+    }
     const superSql = newIsSuperuser ? 'SUPERUSER CREATEDB CREATEROLE' : 'NOSUPERUSER NOCREATEDB NOCREATEROLE';
-    const pwdSql = newPassword ? `PASSWORD '${newPassword}'` : '';
-    const sql = `CREATE ROLE "${newUsername}" WITH LOGIN ${superSql} ${pwdSql};`;
+    const sql = `CREATE ROLE "${ident}" WITH LOGIN ${superSql} ${pwdSql};`;
     try {
-      await executeSql(connId, sql);
+      await executeSql(connId, sql, true); // WP1: CREATE ROLE 走 UI 自有确认流, force 豁免 Critical 弹框
+      recordChange(sql.replace(/PASSWORD '[^']*'/, "PASSWORD '[REDACTED]'"), true);
       setShowAddUserModal(false);
+      setBanner({ kind: 'success', text: `用户 "${newUsername}" 创建成功` });
       await reloadUsers();
     } catch (err: any) {
-      alert(`创建用户失败: ${err.message || String(err)}`);
+      recordChange(sql.replace(/PASSWORD '[^']*'/, "PASSWORD '[REDACTED]'"), false, errToStr(err));
+      setBanner({ kind: 'error', text: `创建用户失败: ${errToStr(err)}` });
     }
   };
 
   const handleDeleteUser = async (uname: string) => {
-    if (!confirm(`确定要注销并删除数据库用户 "${uname}" 吗？`)) return;
+    // WP8-S4: WKWebView confirm 是 no-op → 应用内对话框 (复述角色名)
+    const ok = await appConfirm({
+      title: '删除数据库用户',
+      message: `确定要注销并删除数据库用户 "${uname}" 吗？\n\n该操作不可撤销；若角色仍持有对象或存在依赖会话, PostgreSQL 将拒绝执行并返回具体原因。`,
+      confirmText: `删除 "${uname}"`,
+      danger: true,
+    });
+    if (!ok) return;
+    const ident = safeIdent(uname);
+    if (ident === null) {
+      setBanner({ kind: 'error', text: `角色名 "${uname}" 含非法字符, 已拒绝删除` });
+      return;
+    }
     try {
-      await executeSql(connId, `DROP ROLE IF EXISTS "${uname}";`);
+      // WP8-S4: DROP ROLE 走 WP1 guard 通道 (后端 AST 管道 + Critical 确认), 不再 force 直发
+      await executeSqlWithGuard(connId, `DROP ROLE IF EXISTS "${ident}";`, async (payload) =>
+        appConfirm({
+          title: '高危操作二次确认 (后端安全管道)',
+          message: `DROP ROLE 被后端判定为 ${payload.risk_level} 级风险：\n${(payload.reasons || []).join('\n')}\n\n确认对角色 "${uname}" 强制执行？`,
+          confirmText: '确认执行',
+          danger: true,
+        })
+      );
+      recordChange(`DROP ROLE IF EXISTS "${ident}";`, true);
+      setBanner({ kind: 'success', text: `用户 "${uname}" 已删除` });
       await reloadUsers();
     } catch (err: any) {
-      alert(`删除用户失败: ${err.message || String(err)}`);
+      recordChange(`DROP ROLE IF EXISTS "${ident}";`, false, errToStr(err));
+      setBanner({ kind: 'error', text: `删除用户失败: ${errToStr(err)}` });
     }
   };
 
@@ -321,99 +450,128 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
    * 3. Schema 全表默认权限 (All Tables In Schema)
    * 4. 细粒度单表级权限 (Granular Table-Level: SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER)
    */
-  const generateSqlStatements = (): string[] => {
-    if (!selectedUser) return [];
-    const sqls: string[] = [];
-    const superSql = selectedUser.isSuperuser ? 'SUPERUSER' : 'NOSUPERUSER';
-    const createdbSql = selectedUser.canCreateDb ? 'CREATEDB' : 'NOCREATEDB';
-    const createroleSql = selectedUser.canCreateRole ? 'CREATEROLE' : 'NOCREATEROLE';
-    const loginSql = selectedUser.canLogin ? 'LOGIN' : 'NOLOGIN';
-    sqls.push(`ALTER ROLE "${selectedUser.username}" WITH ${superSql} ${createdbSql} ${createroleSql} ${loginSql} CONNECTION LIMIT -1;`);
-    
-    // 1. 处理 Schema 模式级 Diff
-    Object.entries(privilegeMatrix).forEach(([schema, current]) => {
-      if (current.isSystemSchema) return;
-      const initial = initialPrivilegeRef.current[schema] || { usage: false, create: false, select: false, insert: false, update: false, delete: false, truncate: false };
-
-      if (current.usage && !initial.usage) {
-        sqls.push(`GRANT USAGE ON SCHEMA "${schema}" TO "${selectedUser.username}";`);
-      } else if (!current.usage && initial.usage) {
-        sqls.push(`REVOKE USAGE ON SCHEMA "${schema}" FROM "${selectedUser.username}" CASCADE;`);
+  const generateSqlStatements = (): { sqls: string[]; error?: string } => {
+    if (!selectedUser) return { sqls: [] };
+    // WP8-S5/S6: 渲染期防御 — 本函数在 footer 每次 render 都会执行 (经 useMemo 缓存);
+    // 任何异常/非法标识符都不得抛进 render (无 ErrorBoundary 时会导致全树卸载=黑屏),
+    // 而是归入 error 字段由 UI 显式呈现。禁止假数据兜底: 出错就不生成 DDL。
+    try {
+      const uname = safeIdent(selectedUser.username);
+      if (uname === null) {
+        return { sqls: [], error: `角色名 "${selectedUser.username}" 含非法字符, 无法生成变更 SQL` };
       }
+      const sqls: string[] = [];
+      const superSql = selectedUser.isSuperuser ? 'SUPERUSER' : 'NOSUPERUSER';
+      const createdbSql = selectedUser.canCreateDb ? 'CREATEDB' : 'NOCREATEDB';
+      const createroleSql = selectedUser.canCreateRole ? 'CREATEROLE' : 'NOCREATEROLE';
+      const loginSql = selectedUser.canLogin ? 'LOGIN' : 'NOLOGIN';
+      sqls.push(`ALTER ROLE "${uname}" WITH ${superSql} ${createdbSql} ${createroleSql} ${loginSql} CONNECTION LIMIT -1;`);
 
-      if (current.create && !initial.create) {
-        sqls.push(`GRANT CREATE ON SCHEMA "${schema}" TO "${selectedUser.username}";`);
-      } else if (!current.create && initial.create) {
-        sqls.push(`REVOKE CREATE ON SCHEMA "${schema}" FROM "${selectedUser.username}" CASCADE;`);
-      }
+      // 1. 处理 Schema 模式级 Diff
+      Object.entries(privilegeMatrix).forEach(([schema, current]) => {
+        if (!current || current.isSystemSchema) return; // WP8-S5: 字段缺失防御
+        const sch = safeIdent(schema);
+        if (sch === null) {
+          throw new Error(`Schema 名 "${schema}" 含非法字符, 已中止 SQL 生成`);
+        }
+        const initial = initialPrivilegeRef.current[schema] || { usage: false, create: false, select: false, insert: false, update: false, delete: false, truncate: false };
 
-      const tablePrivs = ['select', 'insert', 'update', 'delete', 'truncate'] as const;
-      const privMap = { select: 'SELECT', insert: 'INSERT', update: 'UPDATE', delete: 'DELETE', truncate: 'TRUNCATE' };
-      
-      const newlyGranted: string[] = [];
-      const newlyRevoked: string[] = [];
+        if (current.usage && !initial.usage) {
+          sqls.push(`GRANT USAGE ON SCHEMA "${sch}" TO "${uname}";`);
+        } else if (!current.usage && initial.usage) {
+          sqls.push(`REVOKE USAGE ON SCHEMA "${sch}" FROM "${uname}" CASCADE;`);
+        }
 
-      tablePrivs.forEach((p) => {
-        if (current[p] && !initial[p]) newlyGranted.push(privMap[p]);
-        if (!current[p] && initial[p]) newlyRevoked.push(privMap[p]);
+        if (current.create && !initial.create) {
+          sqls.push(`GRANT CREATE ON SCHEMA "${sch}" TO "${uname}";`);
+        } else if (!current.create && initial.create) {
+          sqls.push(`REVOKE CREATE ON SCHEMA "${sch}" FROM "${uname}" CASCADE;`);
+        }
+
+        const tablePrivs = ['select', 'insert', 'update', 'delete', 'truncate'] as const;
+        const privMap = { select: 'SELECT', insert: 'INSERT', update: 'UPDATE', delete: 'DELETE', truncate: 'TRUNCATE' };
+
+        const newlyGranted: string[] = [];
+        const newlyRevoked: string[] = [];
+
+        tablePrivs.forEach((p) => {
+          if (current[p] && !initial[p]) newlyGranted.push(privMap[p]);
+          if (!current[p] && initial[p]) newlyRevoked.push(privMap[p]);
+        });
+
+        if (newlyGranted.length > 0) {
+          sqls.push(`GRANT ${newlyGranted.join(', ')} ON ALL TABLES IN SCHEMA "${sch}" TO "${uname}";`);
+          sqls.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${sch}" GRANT ${newlyGranted.join(', ')} ON TABLES TO "${uname}";`);
+        }
+        if (newlyRevoked.length > 0) {
+          sqls.push(`REVOKE ${newlyRevoked.join(', ')} ON ALL TABLES IN SCHEMA "${sch}" FROM "${uname}";`);
+          sqls.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${sch}" REVOKE ${newlyRevoked.join(', ')} ON TABLES FROM "${uname}";`);
+        }
       });
 
-      if (newlyGranted.length > 0) {
-        sqls.push(`GRANT ${newlyGranted.join(', ')} ON ALL TABLES IN SCHEMA "${schema}" TO "${selectedUser.username}";`);
-        sqls.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schema}" GRANT ${newlyGranted.join(', ')} ON TABLES TO "${selectedUser.username}";`);
-      }
-      if (newlyRevoked.length > 0) {
-        sqls.push(`REVOKE ${newlyRevoked.join(', ')} ON ALL TABLES IN SCHEMA "${schema}" FROM "${selectedUser.username}";`);
-        sqls.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schema}" REVOKE ${newlyRevoked.join(', ')} ON TABLES FROM "${selectedUser.username}";`);
-      }
-    });
+      // 2. 处理细粒度单表级 Diff
+      Object.entries(tablePrivileges).forEach(([key, current]) => {
+        if (!current) return; // WP8-S5: 字段缺失防御
+        const sch = safeIdent(current.schemaName);
+        const tbl = safeIdent(current.tableName);
+        if (sch === null || tbl === null) {
+          throw new Error(`表 "${key}" 的 schema/表名含非法字符, 已中止 SQL 生成`);
+        }
+        const initial = initialTablePrivilegesRef.current[key] || {
+          schemaName: current.schemaName,
+          tableName: current.tableName,
+          select: false,
+          insert: false,
+          update: false,
+          delete: false,
+          truncate: false,
+          references: false,
+          trigger: false,
+        };
 
-    // 2. 处理细粒度单表级 Diff
-    Object.entries(tablePrivileges).forEach(([key, current]) => {
-      const initial = initialTablePrivilegesRef.current[key] || {
-        schemaName: current.schemaName,
-        tableName: current.tableName,
-        select: false,
-        insert: false,
-        update: false,
-        delete: false,
-        truncate: false,
-        references: false,
-        trigger: false,
-      };
+        const tablePrivKeys = ['select', 'insert', 'update', 'delete', 'truncate', 'references', 'trigger'] as const;
+        const tablePrivMap = {
+          select: 'SELECT',
+          insert: 'INSERT',
+          update: 'UPDATE',
+          delete: 'DELETE',
+          truncate: 'TRUNCATE',
+          references: 'REFERENCES',
+          trigger: 'TRIGGER',
+        };
 
-      const tablePrivKeys = ['select', 'insert', 'update', 'delete', 'truncate', 'references', 'trigger'] as const;
-      const tablePrivMap = {
-        select: 'SELECT',
-        insert: 'INSERT',
-        update: 'UPDATE',
-        delete: 'DELETE',
-        truncate: 'TRUNCATE',
-        references: 'REFERENCES',
-        trigger: 'TRIGGER',
-      };
+        const tableGranted: string[] = [];
+        const tableRevoked: string[] = [];
 
-      const tableGranted: string[] = [];
-      const tableRevoked: string[] = [];
+        tablePrivKeys.forEach((k) => {
+          if (current[k] && !initial[k]) tableGranted.push(tablePrivMap[k]);
+          if (!current[k] && initial[k]) tableRevoked.push(tablePrivMap[k]);
+        });
 
-      tablePrivKeys.forEach((k) => {
-        if (current[k] && !initial[k]) tableGranted.push(tablePrivMap[k]);
-        if (!current[k] && initial[k]) tableRevoked.push(tablePrivMap[k]);
+        if (tableGranted.length > 0) {
+          // 自动确保 Schema 的 USAGE 权限
+          sqls.push(`GRANT USAGE ON SCHEMA "${sch}" TO "${uname}";`);
+          sqls.push(`GRANT ${tableGranted.join(', ')} ON TABLE "${sch}"."${tbl}" TO "${uname}";`);
+        }
+        if (tableRevoked.length > 0) {
+          sqls.push(`REVOKE ${tableRevoked.join(', ')} ON TABLE "${sch}"."${tbl}" FROM "${uname}";`);
+        }
       });
 
-      if (tableGranted.length > 0) {
-        // 自动确保 Schema 的 USAGE 权限
-        sqls.push(`GRANT USAGE ON SCHEMA "${current.schemaName}" TO "${selectedUser.username}";`);
-        sqls.push(`GRANT ${tableGranted.join(', ')} ON TABLE "${current.schemaName}"."${current.tableName}" TO "${selectedUser.username}";`);
-      }
-      if (tableRevoked.length > 0) {
-        sqls.push(`REVOKE ${tableRevoked.join(', ')} ON TABLE "${current.schemaName}"."${current.tableName}" FROM "${selectedUser.username}";`);
-      }
-    });
-
-    // 去重保持执行精简
-    return Array.from(new Set(sqls));
+      // 去重保持执行精简
+      return { sqls: Array.from(new Set(sqls)) };
+    } catch (e: any) {
+      // 显式呈现, 不静默兜底
+      return { sqls: [], error: errToStr(e) };
+    }
   };
+
+  // WP8-S5: footer 每次 render 都会消费 — useMemo 缓存, deps 变化才重算
+  const sqlStatementsMemo = useMemo(
+    () => generateSqlStatements(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedUser, privilegeMatrix, tablePrivileges]
+  );
 
   const handleApplyRolePrivileges = async () => {
     if (!selectedUser) return;
@@ -424,36 +582,48 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
         (t) => !t.select || !t.insert || !t.update || !t.delete || !t.truncate || !t.references || !t.trigger
       );
       if (hasUncheckedTablePriv) {
-        const proceed = confirm(
-          `⚠️ PostgreSQL 核心机制提示：\n\n用户 "${selectedUser.username}" 当前仍保留【超级管理员 (SUPERUSER)】属性！\n\n在 PostgreSQL 中，超级管理员在内核级别无视任何单表或 Schema 的 REVOKE 约束（探查时依然会拥有全部权限）。\n\n💡 若要真正限制其单表权限，请先在「角色基本特权」页签中取消其 SUPERUSER 特权。\n\n是否仍然继续执行变更？`
-        );
+        const proceed = await appConfirm({
+          title: 'PostgreSQL 核心机制提示',
+          message: `用户 "${selectedUser.username}" 当前仍保留【超级管理员 (SUPERUSER)】属性！\n\n在 PostgreSQL 中，超级管理员在内核级别无视任何单表或 Schema 的 REVOKE 约束（探查时依然会拥有全部权限）。\n\n💡 若要真正限制其单表权限，请先在「角色基本特权」页签中取消其 SUPERUSER 特权。\n\n是否仍然继续执行变更？`,
+          confirmText: '仍然继续',
+          danger: true,
+        });
         if (!proceed) return;
       }
     }
 
     setIsApplying(true);
-    const sqlStatements = generateSqlStatements();
+    const gen = sqlStatementsMemo;
+    if (gen.error) {
+      setBanner({ kind: 'error', text: `无法生成变更 SQL：${gen.error}` });
+      setIsApplying(false);
+      return;
+    }
+    if (gen.sqls.length === 0) {
+      setBanner({ kind: 'warn', text: '未检测到任何权限变更 (与数据库当前状态一致), 无需执行' });
+      setIsApplying(false);
+      return;
+    }
+    const sqlStatements = gen.sqls;
     const errors: string[] = [];
     
     for (const stmt of sqlStatements) {
       try {
-        await executeSql(connId, stmt);
+        await executeSql(connId, stmt, true); // WP1: ACL 变更已经过矩阵 UI 用户确认
+        recordChange(stmt, true);
       } catch (e: any) {
         console.error('SQL Execution Failed:', stmt, e);
-        errors.push(`• ${stmt}\n  原因: ${e.message || String(e)}`);
+        recordChange(stmt, false, errToStr(e));
+        errors.push(`• ${stmt}\n  原因: ${errToStr(e)}`);
       }
     }
     
     if (errors.length > 0) {
-      alert(`⚠️ 数据库执行了部分语句，但有以下错误：\n\n${errors.join('\n\n')}`);
+      setBanner({ kind: 'error', text: `数据库执行了部分语句，但有以下错误：\n${errors.join('\n')}` });
+    } else if (selectedUser.isSuperuser) {
+      setBanner({ kind: 'warn', text: `SQL 执行成功。提示：由于 "${selectedUser.username}" 是超级管理员 (SUPERUSER)，PostgreSQL 内核依然会授予其物理全权。如需隔离表权限，请在基本特权中降级为普通角色。` });
     } else {
-      if (selectedUser.isSuperuser) {
-        alert(
-          `ℹ️ SQL 执行成功！\n\n提示：由于 "${selectedUser.username}" 是超级管理员 (SUPERUSER)，PostgreSQL 内核依然会授予其物理全权。如需隔离表权限，请在基本特权中降级为普通角色。`
-        );
-      } else {
-        alert(`✅ 用户 "${selectedUser.username}" 模式与表级权限已成功在 PostgreSQL 数据库中生效！`);
-      }
+      setBanner({ kind: 'success', text: `用户 "${selectedUser.username}" 模式与表级权限已成功在 PostgreSQL 数据库中生效！` });
     }
     
     await fetchRealPrivileges(selectedUser.username);
@@ -506,14 +676,21 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
   const handleResetPasswordCommit = async () => {
     if (!resetPwdUser || !resetPassword) return;
+    // WP8-S6: 角色名/密码全部安全化后再拼接
+    const ident = safeIdent(resetPwdUser);
+    const pwdLit = safeLiteral(resetPassword);
+    if (ident === null || pwdLit === null) {
+      setBanner({ kind: 'error', text: '角色名或密码含非法字符, 已拒绝重置' });
+      return;
+    }
     try {
-      const sql = `ALTER ROLE "${resetPwdUser}" WITH PASSWORD '${resetPassword}';`;
-      await executeSql(connId, sql);
-      alert(`✅ 用户 "${resetPwdUser}" 密码重置成功！`);
+      const sql = `ALTER ROLE "${ident}" WITH PASSWORD '${pwdLit}';`;
+      await executeSql(connId, sql, true); // WP1: UI 弹窗即用户确认
+      setBanner({ kind: 'success', text: `用户 "${resetPwdUser}" 密码重置成功！` });
       setResetPwdUser(null);
       setResetPassword('');
     } catch (err: any) {
-      alert(`❌ 重置密码失败: ${err.message || String(err)}`);
+      setBanner({ kind: 'error', text: `重置密码失败: ${errToStr(err)}` });
     }
   };
 
@@ -527,9 +704,16 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     });
   };
 
+
+  // WP8: 全部 hooks 已无条件执行完毕, 此处早返回安全
+  if (!isOpen) return null;
+
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-      <div className="bg-[#101216] border border-slate-800 rounded-3xl w-full max-w-5xl h-[85vh] flex flex-col shadow-2xl overflow-hidden font-sans">
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6">
+      {/* WP8-S8: 移除 backdrop-blur — macOS 27 beta WKWebView 全屏 backdrop-filter 有合成黑屏风险; 纯色遮罩视觉等效 */}
+      <ErrorBoundary variant="modal" name="用户权限管理" onClose={onClose}>
+      {/* WP9-P0: max-w-5xl→6xl, 给左侧可拖宽面板(最大480px)留出空间, 不挤占右侧权限矩阵 */}
+      <div className="bg-[#101216] border border-slate-800 rounded-3xl w-full max-w-6xl h-[88vh] flex flex-col shadow-2xl overflow-hidden font-sans">
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-[#14171d]">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
@@ -547,41 +731,192 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
               <p className="text-xs text-slate-400">遵循 PostgreSQL ACL 授权机制与系统目录规范，严密管理模式访问与表级数据读写</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
+          <div className="flex items-center gap-2">
+            {/* WP9-P2-2 顺手修复: 新建用户表单原本无入口 (死 UI) — header 补按钮 */}
+            <button
+              onClick={() => { setNewUsername(''); setNewPassword(''); setNewIsSuperuser(false); setShowAddUserModal(true); }}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow transition-colors"
+              title="新建数据库用户 (Create New Role)"
+              data-testid="open-add-user"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>新建用户</span>
+            </button>
+            <button onClick={onClose} className="text-slate-400 hover:text-white p-1" aria-label="关闭">✕</button>
+          </div>
         </div>
 
-        <div className="flex-1 flex overflow-hidden">
-          <div className="w-64 border-r border-slate-800 bg-[#12141a] overflow-y-auto p-2">
-            {users.map((u) => (
-              <div
-                key={u.username}
-                onClick={() => handleSelectUser(u)}
-                className={`p-2.5 rounded-xl cursor-pointer flex items-center justify-between transition-colors ${selectedUser?.username === u.username ? 'bg-blue-600/15 border border-blue-500/40' : 'hover:bg-slate-800/40 border border-transparent'}`}
-              >
-                <div className="flex items-center gap-2 overflow-hidden">
-                  <div className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${u.isSuperuser ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-400'}`}>
-                    {u.isSuperuser ? <Shield className="w-3.5 h-3.5" /> : <User className="w-3.5 h-3.5" />}
-                  </div>
-                  <div className="truncate">
-                    <div className="font-mono text-xs font-bold text-slate-200 truncate">{u.username}</div>
-                    <div className="text-[10px] text-slate-500">{u.isSuperuser ? 'SUPERUSER' : '普通用户'}</div>
-                  </div>
-                </div>
-                {u.username !== 'postgres' && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteUser(u.username);
-                    }}
-                    className="p-1 hover:bg-red-500/20 text-slate-600 hover:text-red-400 rounded transition-colors"
-                    title="删除此角色"
+        {/* WP8-S4: inline 错误/成功横幅 — 替代 WKWebView 中 no-op 的 alert */}
+        <InlineBanner banner={banner} onDismiss={() => setBanner(null)} />
+
+        {/* WP9-P2-2: 本次会话权限变更历史 (审计回溯, 可导出) */}
+        {changeHistory.length > 0 && (
+          <div className="px-4 border-b border-slate-800/80 bg-[#0d0f14]/60 shrink-0" data-testid="change-history">
+            <button
+              onClick={() => setIsHistoryOpen((v) => !v)}
+              className="w-full py-1.5 flex items-center justify-between text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              <span className="flex items-center gap-1.5 font-semibold">
+                📜 本次会话变更历史 ({changeHistory.length} 条,
+                {changeHistory.filter((h) => h.ok).length} 成功
+                {changeHistory.some((h) => !h.ok) ? ` / ${changeHistory.filter((h) => !h.ok).length} 失败` : ''})
+              </span>
+              <span className="flex items-center gap-2">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const text = changeHistory
+                      .map((h) => `[${h.at}] ${h.ok ? 'OK ' : 'FAIL'} ${h.sql}${h.error ? ` -- ${h.error}` : ''}`)
+                      .join('\n');
+                    navigator.clipboard.writeText(text);
+                  }}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 border border-slate-700 cursor-pointer"
+                  title="复制全部变更历史 (文本)"
+                  data-testid="copy-history"
+                >
+                  复制导出
+                </span>
+                <span>{isHistoryOpen ? '▲' : '▼'}</span>
+              </span>
+            </button>
+            {isHistoryOpen && (
+              <div className="max-h-32 overflow-y-auto pb-2 space-y-1" data-testid="change-history-list">
+                {changeHistory.map((h, i) => (
+                  <div
+                    key={i}
+                    className={`text-[10px] font-mono px-2 py-1 rounded border ${
+                      h.ok
+                        ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-300/90'
+                        : 'bg-red-500/5 border-red-500/25 text-red-300/90'
+                    }`}
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <span className="text-slate-500 mr-1.5">{h.at}</span>
+                    <span className={h.ok ? 'text-emerald-400' : 'text-red-400'}>{h.ok ? '✓' : '✗'}</span>{' '}
+                    <span className="break-all">{h.sql}</span>
+                    {h.error && <div className="text-red-400/80 mt-0.5 break-all">↳ {h.error}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1 flex overflow-hidden">
+          {/* WP9-P0: 左侧用户面板 — 可拖拽调宽 + 搜索过滤 + 长角色名可见 + 空状态 */}
+          <div
+            ref={panelRef}
+            className="border-r border-slate-800 bg-[#12141a] flex flex-col shrink-0"
+            style={{ width: `${userPanelWidth}px` }}
+            data-testid="user-panel"
+          >
+            {/* 搜索框 */}
+            <div className="p-2 border-b border-slate-800/80 shrink-0">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={userSearch}
+                  onChange={(e) => setUserSearch(e.target.value)}
+                  placeholder="搜索角色名…"
+                  aria-label="搜索用户角色"
+                  className="w-full bg-slate-900/70 border border-slate-700/70 rounded-lg pl-8 pr-7 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500/70"
+                />
+                {userSearch && (
+                  <button
+                    onClick={() => setUserSearch('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-xs"
+                    aria-label="清除搜索"
+                  >
+                    ✕
                   </button>
                 )}
               </div>
-            ))}
+              {/* WP9-P2-3: 属性 chips */}
+              <div className="mt-1.5 flex items-center gap-1" data-testid="user-attr-chips">
+                {([
+                  ['all', '全部'],
+                  ['superuser', 'SUPERUSER'],
+                  ['login', '可登录'],
+                ] as const).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setUserAttrFilter(val)}
+                    className={`px-1.5 py-0.5 rounded-md text-[9px] font-semibold border transition-colors ${
+                      userAttrFilter === val
+                        ? 'bg-blue-600/30 border-blue-500/60 text-blue-300'
+                        : 'bg-slate-800/50 border-slate-700/60 text-slate-400 hover:text-slate-200'
+                    }`}
+                    data-testid={`attr-chip-${val}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <span className="ml-auto text-[9px] text-slate-500 font-mono">
+                  {filteredUsers.length}/{users.length}
+                </span>
+              </div>
+            </div>
+
+            {/* 用户列表 */}
+            <div className="flex-1 overflow-y-auto p-2">
+              {filteredUsers.length === 0 ? (
+                <div className="mt-8 px-3 text-center text-[11px] text-slate-500 leading-relaxed">
+                  {users.length === 0
+                    ? '未加载到任何角色。请确认连接正常且当前账号可读取 pg_roles。'
+                    : `没有匹配${userSearch.trim() ? ` "${userSearch}"` : ''}${userAttrFilter !== 'all' ? ` (${userAttrFilter === 'superuser' ? 'SUPERUSER' : '可登录'})` : ''} 的角色`}
+                </div>
+              ) : (
+                filteredUsers.map((u) => (
+                  <div
+                    key={u.username}
+                    onClick={() => handleSelectUser(u)}
+                    title={u.username}
+                    className={`group p-2.5 rounded-xl cursor-pointer flex items-center justify-between gap-1.5 transition-colors ${selectedUser?.username === u.username ? 'bg-blue-600/15 border border-blue-500/40' : 'hover:bg-slate-800/40 border border-transparent'}`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <div className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${u.isSuperuser ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-400'}`}>
+                        {u.isSuperuser ? <Shield className="w-3.5 h-3.5" /> : <User className="w-3.5 h-3.5" />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        {/* WP9: 拖宽后角色名完整换行显示, 不再 truncate 截断 */}
+                        <div className="font-mono text-xs font-bold text-slate-200 break-all leading-snug">{u.username}</div>
+                        <div className="text-[10px] text-slate-500">
+                          {u.isSuperuser ? 'SUPERUSER' : '普通用户'}
+                          {u.isCurrentUser ? ' · 当前' : ''}
+                          {u.canLogin === false ? ' · 不可登录' : ''}
+                        </div>
+                      </div>
+                    </div>
+                    {u.username !== 'postgres' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteUser(u.username);
+                        }}
+                        className="p-1 hover:bg-red-500/20 text-slate-600 hover:text-red-400 rounded transition-colors shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                        title="删除此角色"
+                        aria-label={`删除角色 ${u.username}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
+
+          {/* WP9-P0: 拖拽分隔条 (与主框架 Separator 视觉一致) */}
+          <div
+            onMouseDown={startResize}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖拽调整用户列表宽度"
+            data-testid="user-panel-resizer"
+            className="w-1.5 shrink-0 bg-slate-800 hover:bg-blue-500 transition-colors cursor-col-resize"
+          />
 
           {selectedUser ? (
             <div className="flex-1 flex flex-col bg-[#14171d]">
@@ -955,7 +1290,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                 <div className="flex items-center gap-2 text-[11px] font-mono text-slate-400 overflow-hidden max-w-xl truncate">
                   <Shield className="w-4 h-4 text-emerald-400 shrink-0" />
                   <span className="truncate">
-                    SQL: <code className="text-amber-300 font-bold">{generateSqlStatements()[0] || '-- No changes'}</code>
+                    SQL: <code className="text-amber-300 font-bold">{sqlStatementsMemo.error ? `⚠ ${sqlStatementsMemo.error}` : (sqlStatementsMemo.sqls[0] || '-- No changes')}</code>
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -986,7 +1321,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
         {/* Modal inside Modal: Add New User */}
         {showAddUserModal && (
-          <div className="absolute inset-0 bg-black/75 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
             <div className="bg-[#181b22] border border-slate-700/90 rounded-2xl w-full max-w-md p-5 text-xs text-slate-200 space-y-4 shadow-2xl">
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <span className="font-bold text-sm text-white flex items-center gap-2">
@@ -1047,7 +1382,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
         {/* Modal inside Modal: Reset Password */}
         {resetPwdUser && (
-          <div className="absolute inset-0 bg-black/75 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
             <div className="bg-[#181b22] border border-amber-500/40 rounded-2xl w-full max-w-md p-5 text-xs text-slate-200 space-y-4 shadow-2xl">
               <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <span className="font-bold text-sm text-amber-300 flex items-center gap-2">
@@ -1085,7 +1420,11 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
             </div>
           </div>
         )}
+
+        {/* WP8-S4: 应用内确认对话框 (Promise 化, 替代 no-op 的 window.confirm) */}
+        {confirmDialog}
       </div>
+      </ErrorBoundary>
     </div>
   );
 };

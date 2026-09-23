@@ -1,9 +1,28 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { QueryResult, QueryResultTabItem } from '../types';
-import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle } from 'lucide-react';
+import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Copy, Filter, ClipboardPaste } from 'lucide-react';
 import { RowDetailDrawer } from './RowDetailDrawer';
+import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
+import { errToStr } from '../services/ipc';
+import { explainPgError } from '../utils/pgErrorHints';
+import { PaginationBar } from './PaginationBar';
+import { FilterBuilder, ColumnMetaLite } from './FilterBuilder';
+import { useAppStore } from '../store/useAppStore';
+import { showAlert } from '../services/appDialog';
+
+/** WP9-P1-6: 大结果集渲染上限 — 超过只渲染前 N 行并横幅警示 (数据仍全量在内存, 导出不受影响) */
+const MAX_RENDER_ROWS = 2000;
 
 interface DataGridProps {
+  /** WP9-P1-7: 查询失败错误 (与 result=null 区分"未执行/0行/失败"三态) */
+  error?: string | null;
+  /** WP10: 浏览表模式列元数据 (内联 FilterBuilder 列名自动带出) */
+  filterColumns?: ColumnMetaLite[];
+  /** WP10: 内联过滤面板受控开关 (App 层持有 — 工具条按钮与右键"分页浏览"入口共用) */
+  filterPanelOpen?: boolean;
+  onFilterPanelOpenChange?: (open: boolean) => void;
+  /** WP10: 内联过滤面板"应用"回调 → store.pagingSetFilters */
+  onApplyFilters?: (filters: import('../utils/browseSqlBuilder').BrowseFilter[], combinator: import('../utils/browseSqlBuilder').FilterCombinator) => void;
   result: QueryResult | null;
   resultTabs?: QueryResultTabItem[];
   activeTabId?: string;
@@ -19,12 +38,17 @@ interface DataGridProps {
 
 export const DataGrid: React.FC<DataGridProps> = ({
   result,
+  error,
   resultTabs = [],
   activeTabId,
   onSelectTab,
   isExecuting,
   tableName,
-  onCommitChanges
+  onCommitChanges,
+  filterColumns,
+  filterPanelOpen = false,
+  onFilterPanelOpenChange,
+  onApplyFilters
 }) => {
   // 暂存修改区: { "rowIndex_colName": "newValue" } (rowIndex < originalLength 表示修改原行，>= originalLength 表示新增行)
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -32,6 +56,11 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
   // 排序状态: { colName: string, direction: 'asc' | 'desc' } | null
   const [sortState, setSortState] = useState<{ colName: string; direction: 'asc' | 'desc' } | null>(null);
+
+  // WP9-P2-1: 列头快速筛选 { colName: 子串 } — 仅过滤已加载行 (明示范围, 不改 SQL)
+  const [colFilters, setColFilters] = useState<Record<string, string>>({});
+  // WP10: 分页状态 (store 单一来源; null = 非分页模式)
+  const paging = useAppStore((st) => st.paging);
 
   // 标记待删除行索引集合
   const [pendingDeletions, setPendingDeletions] = useState<Set<number>>(new Set());
@@ -54,7 +83,10 @@ export const DataGrid: React.FC<DataGridProps> = ({
     x: number;
     y: number;
     rowIdx: number;
+    colIdx?: number;
   } | null>(null);
+  // WP9-P1-5: 复制成功瞬时反馈
+  const [copyFlash, setCopyFlash] = useState<string | null>(null);
 
   // 清空所有状态当 result 变更
   useEffect(() => {
@@ -65,6 +97,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
     setSelectedRowIdx(null);
     setContextMenu(null);
     setSortState(null);
+    setColFilters({});
   }, [result]);
 
   // 点击页面其他区域关闭右键菜单
@@ -119,6 +152,52 @@ export const DataGrid: React.FC<DataGridProps> = ({
     setAddedRows((prev) => [...prev, emptyRow]);
   };
 
+  // WP9-P2-7: 从剪贴板粘贴多行 TSV 造数 (Excel/表格软件复制即 Tab 分隔)
+  // 规则: 按 \n 分行、\t 分列, 依当前列顺序对位; 列数不足补空, 多余截断并提示;
+  //       首行若与列名完全一致视为表头自动跳过 (防把表头当数据)
+  const handlePasteRows = async () => {
+    if (!result) return;
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (e) {
+      showAlert(`无法读取剪贴板: ${errToStr(e)}\n\n提示: 部分系统需要应用获得剪贴板权限。`, { title: '粘贴行失败' });
+      return;
+    }
+    if (!text || !text.trim()) {
+      showAlert('剪贴板为空 — 请先从 Excel/表格软件复制多行数据 (Tab 分隔)。', { title: '粘贴行' });
+      return;
+    }
+    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter((l) => l.length > 0);
+    if (lines.length === 0) return;
+    const colNames = result.columns.map((c) => c.name);
+    let startIdx = 0;
+    // 表头检测: 首行按 Tab 切分后与列名序列完全一致
+    const firstCells = lines[0].split('\t').map((c) => c.trim());
+    if (firstCells.length === colNames.length && firstCells.every((c, i) => c === colNames[i])) {
+      startIdx = 1;
+    }
+    const dataLines = lines.slice(startIdx);
+    if (dataLines.length === 0) {
+      showAlert('剪贴板内容只有表头, 没有数据行。', { title: '粘贴行' });
+      return;
+    }
+    let truncated = 0;
+    const newRows: Record<string, string>[] = dataLines.map((line) => {
+      const cells = line.split('\t');
+      if (cells.length > colNames.length) truncated++;
+      const row: Record<string, string> = {};
+      colNames.forEach((name, i) => {
+        row[name] = cells[i] ?? '';
+      });
+      return row;
+    });
+    setAddedRows((prev) => [...prev, ...newRows]);
+    if (truncated > 0) {
+      showAlert(`已粘贴 ${newRows.length} 行到暂存区 (未提交)。\n\n注意: 其中 ${truncated} 行的列数多于当前结果集列数 (${colNames.length} 列), 多余部分已截断。请核对后再提交。`, { title: '粘贴行完成 (有截断)' });
+    }
+  };
+
   // 标记/取消标记删除选中行
   const toggleMarkDeleteRow = (rowIdx: number) => {
     const originalLength = result?.rows.length || 0;
@@ -155,7 +234,21 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // 根据 sortState 计算排序后的行数组与原始索引映射
   const sortedOriginalRows = useMemo(() => {
     if (!result) return [];
-    const rowsWithIdx = result.rows.map((row, origIdx) => ({ row, origIdx }));
+    let rowsWithIdx = result.rows.map((row, origIdx) => ({ row, origIdx }));
+
+    // WP9-P2-1: 列筛选 (大小写不敏感子串; NULL 按空串参与匹配)
+    const activeFilters = Object.entries(colFilters).filter(([, v]) => v.trim() !== '');
+    if (activeFilters.length > 0) {
+      rowsWithIdx = rowsWithIdx.filter(({ row }) =>
+        activeFilters.every(([colName, needle]) => {
+          const cIdx = result.columns.findIndex((c) => c.name === colName);
+          if (cIdx === -1) return true;
+          const cell = row[cIdx];
+          const text = !cell || isDbValueNull(cell as any) ? '' : String((cell as any).val ?? '');
+          return text.toLowerCase().includes(needle.trim().toLowerCase());
+        })
+      );
+    }
 
     if (!sortState) return rowsWithIdx;
 
@@ -185,16 +278,57 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
       return sortState.direction === 'asc' ? cmp : -cmp;
     });
-  }, [result, sortState, edits]);
+  }, [result, sortState, edits, colFilters]);
 
-  const handleContextMenu = (e: React.MouseEvent, rowIdx: number) => {
+  // WP9-P1-6: 大结果集保护 — 超过上限只渲染前 N 行 (数据仍全量在内存, 排序作用于全量, 导出不受影响)
+  const totalLoaded = sortedOriginalRows.length;
+  const renderTruncated = totalLoaded > MAX_RENDER_ROWS;
+  const visibleRows = renderTruncated ? sortedOriginalRows.slice(0, MAX_RENDER_ROWS) : sortedOriginalRows;
+
+  const handleContextMenu = (e: React.MouseEvent, rowIdx: number, colIdx?: number) => {
     e.preventDefault();
+    e.stopPropagation();
     setSelectedRowIdx(rowIdx);
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
       rowIdx,
+      colIdx,
     });
+  };
+
+  // WP9-P1-5: 复制辅助 (真实单元格值; 瞬时 ✓ 反馈)
+  const flashCopy = (tag: string) => {
+    setCopyFlash(tag);
+    setTimeout(() => setCopyFlash(null), 1200);
+  };
+  const getCellText = (rowIdx: number, colIdx: number): string => {
+    if (!result) return '';
+    const colName = result.columns[colIdx]?.name || `col_${colIdx}`;
+    const key = `${rowIdx}_${colName}`;
+    if (key in edits) return edits[key];
+    if (rowIdx >= result.rows.length) return addedRows[rowIdx - result.rows.length]?.[colName] ?? '';
+    const cell = result.rows[rowIdx]?.[colIdx] ?? { type: 'Null', val: null };
+    return isDbValueNull(cell as any) ? '' : formatDbValue(cell as any);
+  };
+  const copyCellValue = (rowIdx: number, colIdx: number) => {
+    navigator.clipboard.writeText(getCellText(rowIdx, colIdx));
+    flashCopy('cell');
+  };
+  const copyRowCsv = (rowIdx: number) => {
+    if (!result) return;
+    const cells = result.columns.map((_, cIdx) => {
+      const text = getCellText(rowIdx, cIdx);
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    });
+    navigator.clipboard.writeText(cells.join(','));
+    flashCopy('row');
+  };
+  const copyColNameByIdx = (colIdx: number) => {
+    const name = result?.columns[colIdx]?.name;
+    if (!name) return;
+    navigator.clipboard.writeText(name);
+    flashCopy('col');
   };
 
   const handleDiscard = () => {
@@ -225,7 +359,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
       setPendingDeletions(new Set());
       setAddedRows([]);
     } catch (err: any) {
-      alert(`提交变更到数据库失败: ${err.message || String(err)}`);
+      showAlert(`提交变更到数据库失败: ${errToStr(err)}`, { title: '数据库变更失败', danger: true });
     }
   };
 
@@ -243,10 +377,30 @@ export const DataGrid: React.FC<DataGridProps> = ({
   }
 
   if (!result) {
+    // WP9-P1-7: 三态分明 — 失败(红) / 0行(result非null走下方空行提示) / 未执行(灰)
+    if (error) {
+      // WP9-P2-4: 原始报错完整展示 + 常见 PG 错误附加人话建议 (无匹配则不编造)
+      const hint = explainPgError(error);
+      return (
+        <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-xs select-none p-6" data-testid="grid-state-error">
+          <AlertTriangle className="w-8 h-8 text-red-500 mb-2" />
+          <span className="font-bold text-red-400 mb-1">查询执行失败</span>
+          <span className="text-red-300/80 font-mono text-[11px] break-all max-w-xl text-center">{error}</span>
+          {hint && (
+            <div className="mt-3 max-w-xl px-3 py-2 rounded-lg bg-blue-500/10 border border-blue-500/30 text-left" data-testid="grid-error-hint">
+              <div className="text-blue-300 text-[11px] font-semibold mb-0.5">💡 {hint.explain}</div>
+              <div className="text-slate-400 text-[10px] leading-relaxed">{hint.suggestion}</div>
+            </div>
+          )}
+          <span className="text-slate-500 mt-2 text-[10px]">修正 SQL 后重新执行；也可点错误横幅上的「让 AI 解释此错误」</span>
+        </div>
+      );
+    }
     return (
-      <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-slate-500 text-xs select-none">
+      <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-slate-500 text-xs select-none" data-testid="grid-state-idle">
         <Table className="w-8 h-8 text-slate-700 mb-2" />
-        <span>No dataset executed yet. Run a SQL query to inspect results.</span>
+        <span className="font-semibold text-slate-400">尚未执行查询</span>
+        <span className="text-[10px] mt-1 text-slate-600">在上方编辑器写 SQL 后按 Cmd+Enter 执行，或从左侧 Schema 树选择表</span>
       </div>
     );
   }
@@ -315,6 +469,36 @@ export const DataGrid: React.FC<DataGridProps> = ({
             <Plus className="w-3.5 h-3.5" /> 增加行
           </button>
 
+          {/* WP10: 服务端过滤构建器入口 (浏览表模式) — 就地展开内联面板 */}
+          {paging?.mode === 'table' && (
+            <button
+              onClick={() => onFilterPanelOpenChange?.(!filterPanelOpen)}
+              className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors border ${
+                filterPanelOpen
+                  ? 'bg-purple-600 hover:bg-purple-500 text-white border-purple-500'
+                  : 'bg-[#1a1d26] hover:bg-[#222733] text-slate-300 border-[#272d3b]'
+              }`}
+              title="可视化过滤 (在下方展开面板点选生成 WHERE, 列名自动带出)"
+              data-testid="open-filter-builder"
+            >
+              <Filter className={`w-3.5 h-3.5 ${filterPanelOpen ? 'text-white' : 'text-purple-400'}`} />
+              过滤{(paging.filters?.length ?? 0) > 0 ? ` (${paging.filters.length})` : ''}
+              <span className="text-[9px] opacity-70">{filterPanelOpen ? '▲ 收起' : '▼'}</span>
+            </button>
+          )}
+
+          {/* WP9-P2-7: 粘贴多行 TSV 造数 (QA/开发批量造测试数据) */}
+          {!result.is_read_only && (
+            <button
+              onClick={handlePasteRows}
+              className="px-2.5 py-1 bg-[#1a1d26] hover:bg-[#222733] text-slate-300 rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors border border-[#272d3b]"
+              title="从剪贴板粘贴多行 (Tab 分隔, 如从 Excel 复制) 到暂存区"
+              data-testid="paste-rows-btn"
+            >
+              <ClipboardPaste className="w-3.5 h-3.5 text-cyan-400" /> 粘贴行
+            </button>
+          )}
+
           <button
             disabled={selectedRowIdx === null}
             onClick={() => {
@@ -360,8 +544,48 @@ export const DataGrid: React.FC<DataGridProps> = ({
         )}
       </div>
 
+      {/* WP10: 内联过滤构建器折叠面板 (点"过滤"就地展开, 直接填条件) */}
+      {paging?.mode === 'table' && filterPanelOpen && (
+        <FilterBuilder
+          inline
+          isOpen
+          onClose={() => onFilterPanelOpenChange?.(false)}
+          columns={filterColumns || []}
+          initialFilters={paging.filters || []}
+          initialCombinator={paging.combinator || 'AND'}
+          onApply={(filters, combinator) => {
+            onApplyFilters?.(filters, combinator);
+            onFilterPanelOpenChange?.(false); // 应用后收起, 结果立即可见
+          }}
+        />
+      )}
+
       {/* Main Table Grid */}
       <div className="flex-1 overflow-auto bg-[#0d0f14]">
+        {/* WP9-P1-6: 大结果集渲染截断横幅 (真实计数, 不假装全量) */}
+        {renderTruncated && (
+          <div
+            className="sticky top-0 z-20 px-3 py-1.5 bg-amber-500/15 border-b border-amber-500/30 text-amber-300 text-[11px] font-medium flex items-center gap-2 backdrop-blur"
+            data-testid="grid-truncation-banner"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              已加载 {totalLoaded.toLocaleString()} 行，为保障流畅仅渲染前 {MAX_RENDER_ROWS.toLocaleString()} 行；导出功能仍包含全部数据。建议在 SQL 中加 LIMIT / WHERE 缩小结果集。
+            </span>
+          </div>
+        )}
+        {/* WP9-P2-1: 筛选生效横幅 — 明示"仅已加载行"范围, 防止误当全库过滤 */}
+        {Object.values(colFilters).some((v) => v.trim()) && (
+          <div
+            className="sticky top-0 z-10 px-3 py-1 bg-blue-500/10 border-b border-blue-500/30 text-blue-300 text-[10px] font-medium flex items-center gap-2"
+            data-testid="filter-banner"
+          >
+            <Filter className="w-3 h-3 shrink-0" />
+            <span>
+              列筛选生效: {totalLoaded.toLocaleString()}/{result.rows.length.toLocaleString()} 行匹配（仅过滤已加载数据，非全库查询）
+            </span>
+          </div>
+        )}
         <table className="w-full text-left border-collapse font-sans">
           <thead>
             <tr className="bg-[#141720] text-slate-200 border-b border-[#1c202a] sticky top-0 shadow z-10 font-mono">
@@ -427,10 +651,44 @@ export const DataGrid: React.FC<DataGridProps> = ({
                 );
               })}
             </tr>
+            {/* WP9-P2-1: 列快速筛选行 (仅过滤已加载行) */}
+            <tr className="bg-[#0a0c10] border-b border-slate-800">
+              <th className="px-1 py-1 border-r border-[#181c25] text-center align-middle">
+                {Object.values(colFilters).some((v) => v.trim()) ? (
+                  <button
+                    onClick={() => setColFilters({})}
+                    className="text-[9px] text-amber-400 hover:text-amber-300 font-bold px-1"
+                    title="清除全部列筛选"
+                    data-testid="clear-col-filters"
+                  >
+                    清除
+                  </button>
+                ) : (
+                  <Filter className="w-3 h-3 text-slate-600 mx-auto" />
+                )}
+              </th>
+              {result.columns.map((col) => (
+                <th key={`f_${col.name}`} className="px-1 py-1 border-r border-[#181c25]">
+                  <input
+                    type="text"
+                    value={colFilters[col.name] || ''}
+                    onChange={(e) => setColFilters((prev) => ({ ...prev, [col.name]: e.target.value }))}
+                    placeholder="筛选…"
+                    aria-label={`筛选列 ${col.name}`}
+                    className={`w-full min-w-[60px] bg-slate-900/80 border rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none transition-colors ${
+                      (colFilters[col.name] || '').trim()
+                        ? 'border-amber-500/60 text-amber-200 focus:border-amber-400'
+                        : 'border-slate-700/60 text-slate-300 placeholder-slate-600 focus:border-blue-500'
+                    }`}
+                    spellCheck={false}
+                  />
+                </th>
+              ))}
+            </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[12px]">
             {/* 1. 原数据库行 (支持智能多数据类型表头列排序) */}
-            {sortedOriginalRows.map(({ row, origIdx: rIdx }, displayIdx) => {
+            {visibleRows.map(({ row, origIdx: rIdx }, displayIdx) => {
               const isMarkedDeleted = pendingDeletions.has(rIdx);
               const isSelected = selectedRowIdx === rIdx;
 
@@ -471,13 +729,14 @@ export const DataGrid: React.FC<DataGridProps> = ({
                     const colName = result.columns[cIdx]?.name || `col_${cIdx}`;
                     const key = `${rIdx}_${colName}`;
                     const isModified = key in edits;
-                    const displayVal = isModified ? edits[key] : String(cell.val);
+                    const displayVal = isModified ? edits[key] : formatDbValue(cell);
                     const isEditing = editingCell?.rowIdx === rIdx && editingCell?.colName === colName;
-                    const isNull = displayVal === 'NULL';
+                    const isNull = isModified ? displayVal === 'NULL' : isDbValueNull(cell);
 
                     return (
                       <td
                         key={cIdx}
+                        onContextMenu={(e) => handleContextMenu(e, rIdx, cIdx)}
                         onDoubleClick={() => handleCellDoubleClick(rIdx, colName)}
                         className={`px-3 py-1.5 border-r border-[#181c25] whitespace-nowrap max-w-xs truncate h-9 box-border ${
                           isMarkedDeleted
@@ -548,6 +807,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
                     return (
                       <td
                         key={cIdx}
+                        onContextMenu={(e) => handleContextMenu(e, rIdx, cIdx)}
                         onDoubleClick={() => handleCellDoubleClick(rIdx, colName)}
                         className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-800 whitespace-nowrap max-w-xs truncate h-9 box-border"
                         title={displayVal}
@@ -586,6 +846,45 @@ export const DataGrid: React.FC<DataGridProps> = ({
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
+          {/* WP9-P1-5: 复制组 (单元格值 / 行 CSV / 列名) */}
+          {contextMenu.colIdx !== undefined && (
+            <div
+              onClick={() => {
+                copyCellValue(contextMenu.rowIdx, contextMenu.colIdx!);
+                setContextMenu(null);
+              }}
+              className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center gap-2 font-medium"
+              data-testid="ctx-copy-cell"
+            >
+              <Copy className="w-3.5 h-3.5 text-blue-400" />
+              <span>{copyFlash === 'cell' ? '已复制 ✓' : '复制单元格值'}</span>
+            </div>
+          )}
+          <div
+            onClick={() => {
+              copyRowCsv(contextMenu.rowIdx);
+              setContextMenu(null);
+            }}
+            className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center gap-2 font-medium"
+            data-testid="ctx-copy-row"
+          >
+            <Copy className="w-3.5 h-3.5 text-blue-400" />
+            <span>{copyFlash === 'row' ? '已复制 ✓' : '复制整行 (CSV)'}</span>
+          </div>
+          {contextMenu.colIdx !== undefined && (
+            <div
+              onClick={() => {
+                copyColNameByIdx(contextMenu.colIdx!);
+                setContextMenu(null);
+              }}
+              className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center gap-2 font-medium"
+              data-testid="ctx-copy-colname"
+            >
+              <Copy className="w-3.5 h-3.5 text-blue-400" />
+              <span>{copyFlash === 'col' ? '已复制 ✓' : `复制列名 "${result?.columns[contextMenu.colIdx]?.name ?? ''}"`}</span>
+            </div>
+          )}
+
           <div
             onClick={() => {
               setDrawerRowIndex(contextMenu.rowIdx);
@@ -641,6 +940,13 @@ export const DataGrid: React.FC<DataGridProps> = ({
         </div>
       )}
 
+      {/* WP10: 分页条 — paging 仅在 SELECT/浏览模式被设置, 有即显示。
+          (修复: 原条件误用 result.is_read_only — 那是连接级只读旗标,
+          普通可写连接恒为 false 导致分页条永不渲染) */}
+      {paging && (
+        <PaginationBar paging={paging} currentRowCount={result.rows.length} />
+      )}
+
       {/* Row Detail Drawer Side Panel */}
       {isDrawerOpen && result && (
         <RowDetailDrawer
@@ -654,10 +960,12 @@ export const DataGrid: React.FC<DataGridProps> = ({
               ? result.columns.map((col, idx) => {
                   const key = `${drawerRowIndex}_${col.name}`;
                   const isModified = key in edits;
-                  const rawVal = result.rows[drawerRowIndex][idx]?.val;
-                  return { val: isModified ? edits[key] : rawVal };
+                  const cell = result.rows[drawerRowIndex][idx] ?? { type: 'Null', val: null };
+                  // WP5: 编辑覆盖时以 Text tag 传入 (提交路径由 sqlVal 按值判定); 未编辑保留原 tag
+                  return isModified ? { type: 'Text', val: edits[key] } : cell;
                 })
               : result.columns.map((col) => ({
+                  type: 'Text' as const,
                   val: addedRows[drawerRowIndex - originalLength]?.[col.name] ?? ''
                 }))
           }

@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAppStore } from '../store/useAppStore';
-import { getTableSchema, getTableColumnsMetaData, executeSql } from '../services/ipc';
+import { getTableSchema, getTableColumnsMetaData, executeSql , errToStr } from '../services/ipc';
 import { QueryResult } from '../types';
+import { showConfirm } from '../services/appDialog';
 import {
   Bot,
   Send,
   Sparkles,
+  Eraser,
   Table as TableIcon,
   RefreshCw,
   Copy,
@@ -20,12 +22,18 @@ import {
 
 interface AiSidebarProps {
   onInsertSql: (sql: string) => void;
+  /** WP9-P1-3: 直接执行 SQL (走 App runQuery — 含 WP1 安全管道 guard) */
+  onExecuteSql?: (sql: string) => void;
   currentSql?: string;
   currentError?: string | null;
   activeDatabase?: string;
 }
 
 type QueryIntent = 'DBA_ADMIN' | 'ERROR_FIX' | 'TABLE_QUERY' | 'GENERAL';
+
+/** WP9-P1-2: 欢迎语常量 — 新会话重置时复用 (与初始 chatLog 一致) */
+const AI_WELCOME_TEXT = '👋 你好！我是 **DiTing AI PostgreSQL 专家协同助手**。\n\n💡 **核心能力**：\n• **智能意图路由**：权限管理/DBA运维/语法直接秒级答复；数据查询精准匹配字段元数据。\n• **@ 快捷补全**：输入 `@` 可快速引用当前库中的数据表与字段。\n• **错误一键修复**：遇到 SQL 报错可点击下方快捷按钮一键诊断。';
+const makeWelcomeMsg = () => ({ role: 'assistant' as const, text: AI_WELCOME_TEXT });
 
 interface ColumnMeta {
   column_name: string;
@@ -35,6 +43,7 @@ interface ColumnMeta {
 
 export const AiSidebar: React.FC<AiSidebarProps> = ({
   onInsertSql,
+  onExecuteSql,
   currentSql,
   currentError,
   activeDatabase,
@@ -63,12 +72,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       isMutating?: boolean;
       intentTag?: string;
     }>
-  >([
-    {
-      role: 'assistant',
-      text: '👋 你好！我是 **DiTing AI PostgreSQL 专家协同助手**。\n\n💡 **核心能力**：\n• **智能意图路由**：权限管理/DBA运维/语法直接秒级答复；数据查询精准匹配字段元数据。\n• **@ 快捷补全**：输入 `@` 可快速引用当前库中的数据表与字段。\n• **错误一键修复**：遇到 SQL 报错可点击下方快捷按钮一键诊断。'
-    }
-  ]);
+  >([makeWelcomeMsg()]);
 
   const { activeConnId, askAi } = useAppStore();
 
@@ -96,7 +100,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
   useEffect(() => {
     if (selectedTable !== 'AUTO' && selectedTable !== 'NONE' && activeConnId) {
-      getTableColumnsMetaData(activeConnId, selectedTable)
+      // WP4 步骤4: 透传 schema (从表列表匹配, 缺省回退 public)
+      const schemaOf = tables.find((t) => t.name === selectedTable)?.schema_name || 'public';
+      getTableColumnsMetaData(activeConnId, selectedTable, schemaOf)
         .then((cols) => {
           setActiveTableColumns(
             cols.map((c) => ({
@@ -110,7 +116,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     } else {
       setActiveTableColumns([]);
     }
-  }, [selectedTable, activeConnId]);
+  }, [selectedTable, activeConnId, tables]);
 
   const classifyIntent = (userQuery: string): QueryIntent => {
     const q = userQuery.toLowerCase();
@@ -155,6 +161,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       { role: 'user', text: intentLabel ? `${intentLabel} ${userMsg}` : userMsg, intentTag: intent }
     ]);
     setLoading(true);
+    // WP2: 流式占位消息 id (catch 中也需访问, 声明于 try 外)
+    const streamMsgId = `stream_${Date.now()}`;
 
     try {
       let schemaContext = '';
@@ -203,7 +211,7 @@ PostgreSQL Type Rules:
           try {
             const tableInfos = await Promise.all(
               targetTables.slice(0, 5).map(async (tbl) => {
-                const cols = await getTableColumnsMetaData(activeConnId, tbl.name);
+                const cols = await getTableColumnsMetaData(activeConnId, tbl.name, tbl.schema_name || 'public');
                 const colStr = cols.map((c) => `"${c.column_name}" (${c.data_type})`).join(', ');
                 return `Table "${tbl.name}": [${colStr}]`;
               })
@@ -229,7 +237,57 @@ PostgreSQL Data Type & Case Sensitivity Rules:
    - For timestamp/date/varchar/integer/jsonb, apply standard PostgreSQL operators.`;
       }
 
-      const reply = await askAi(userMsg, schemaContext);
+      // WP2: 多轮历史 — 从 chatLog 提取最近 ≤20 条 user/assistant (欢迎语除外), 后端负责 token 预算截断
+      const history: { role: 'user' | 'assistant'; content: string }[] = chatLog
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.text.startsWith('👋'))
+        .slice(-20)
+        .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.text }));
+
+      // WP2: 流式渲染 — 先插入占位 assistant 消息, delta 累积 + 50ms 节流 flush
+      let streamBuffer = '';
+      let lastFlush = 0;
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushToUi = () => {
+        const snapshot = streamBuffer;
+        setChatLog((prev) =>
+          prev.map((m) => ((m as any).id === streamMsgId ? { ...m, text: snapshot } : m))
+        );
+      };
+      const onDelta = (text: string) => {
+        streamBuffer += text;
+        const now = Date.now();
+        if (now - lastFlush >= 50) {
+          lastFlush = now;
+          flushToUi();
+        } else if (!flushTimer) {
+          flushTimer = setTimeout(() => {
+            flushTimer = null;
+            lastFlush = Date.now();
+            flushToUi();
+          }, 50);
+        }
+      };
+      setChatLog((prev) => [
+        ...prev,
+        { role: 'assistant', text: '', intentTag: undefined, ...( { id: streamMsgId } as any) }
+      ]);
+
+      let reply: string;
+      try {
+        reply = await askAi(userMsg, schemaContext, history, onDelta);
+      } finally {
+        if (flushTimer) clearTimeout(flushTimer);
+      }
+      // WP9 防御: askAi 理论上返回 string, 但流式契约异常时可能非字符串。
+      // 兜底用已流式渲染的 buffer (真实内容), 绝不让 undefined 流到下方 .match() 崩溃。
+      if (typeof reply !== 'string') {
+        console.warn('[AiSidebar] askAi 返回非字符串, 回退到流式累积内容', reply);
+        reply = streamBuffer;
+      }
+      // Done 后以 full_text 整体替换校验 (流式拼接可能与后端累积有细微差)
+      setChatLog((prev) =>
+        prev.map((m) => ((m as any).id === streamMsgId ? { ...m, text: reply } : m))
+      );
       const sqlMatch = reply.match(/```(?:sql)?([\s\S]*?)```/i);
       const extractedSql = sqlMatch && sqlMatch[1] ? sqlMatch[1].trim() : null;
 
@@ -238,6 +296,7 @@ PostgreSQL Data Type & Case Sensitivity Rules:
 
       if (extractedSql) {
         const cleanSql = extractedSql.trim().toLowerCase();
+        // 注意: 此白名单仅为体验层快捷判断, 安全判定以后端 AST 管道为准 (WP1)
         if (
           cleanSql.startsWith('update') ||
           cleanSql.startsWith('delete') ||
@@ -261,21 +320,28 @@ PostgreSQL Data Type & Case Sensitivity Rules:
         }
       }
 
-      setChatLog((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: reply,
-          executedSql: extractedSql || undefined,
-          autoQueryResult,
-          isMutating
-        }
-      ]);
+      setChatLog((prev) =>
+        prev.map((m) =>
+          (m as any).id === streamMsgId
+            ? {
+                ...m,
+                text: reply,
+                executedSql: extractedSql || undefined,
+                autoQueryResult,
+                isMutating
+              }
+            : m
+        )
+      );
     } catch (err: any) {
-      setChatLog((prev) => [
-        ...prev,
-        { role: 'assistant', text: `⚠️ 请求 AI 失败: ${err.message || String(err)}` }
-      ]);
+      const errText = `⚠️ 请求 AI 失败: ${errToStr(err)}`;
+      setChatLog((prev) => {
+        // 若流式占位消息已插入, 原地替换为错误气泡 (保留已生成部分被覆盖)
+        const hasPlaceholder = prev.some((m) => (m as any).id === streamMsgId);
+        return hasPlaceholder
+          ? prev.map((m) => ((m as any).id === streamMsgId ? { ...m, text: errText } : m))
+          : [...prev, { role: 'assistant', text: errText }];
+      });
     } finally {
       setLoading(false);
     }
@@ -311,6 +377,20 @@ PostgreSQL Data Type & Case Sensitivity Rules:
     inputRef.current?.focus();
   };
 
+  // WP9-P1-2: 新会话 — 清空历史, 重置为欢迎语 (history 取最近20条, 清空即开新上下文)
+  const handleNewSession = async () => {
+    const hasRealChat = chatLog.some((m) => !(m.role === 'assistant' && m.text === AI_WELCOME_TEXT));
+    if (hasRealChat) {
+      const ok = await showConfirm(
+        '将清空当前 AI 对话历史并开启新会话。\n\n（已插入编辑器的 SQL 不受影响）',
+        { title: '开启新会话', confirmText: '清空并新建' }
+      );
+      if (!ok) return;
+    }
+    setChatLog([makeWelcomeMsg()]);
+    inputRef.current?.focus();
+  };
+
   const filteredMentions = tables
     .filter((t) => t.name.toLowerCase().includes(mentionFilter))
     .slice(0, 8);
@@ -327,7 +407,18 @@ PostgreSQL Data Type & Case Sensitivity Rules:
             </span>
           )}
         </div>
-        <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse shrink-0" />
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={handleNewSession}
+            className="p-1 hover:bg-slate-700 text-slate-400 hover:text-white rounded transition-colors"
+            title="开启新会话 (清空对话历史)"
+            aria-label="开启新会话"
+            data-testid="ai-new-session"
+          >
+            <Eraser className="w-3.5 h-3.5" />
+          </button>
+          <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+        </div>
       </div>
 
       <div className="px-3 py-2 border-b border-slate-800 bg-slate-950/70 space-y-2">
@@ -504,6 +595,19 @@ PostgreSQL Data Type & Case Sensitivity Rules:
                               </>
                             )}
                           </button>
+
+                          {/* WP9-P1-3: 直接执行 — 走 App runQuery (WP1 安全管道, 危险语句仍会二次确认) */}
+                          {onExecuteSql && (
+                            <button
+                              onClick={() => onExecuteSql(part.content)}
+                              className="px-2 py-0.5 bg-emerald-600/80 hover:bg-emerald-500 text-white rounded text-[10px] font-semibold flex items-center gap-1 transition-colors shadow"
+                              title="送入主编辑器安全管道执行 (写操作仍会二次确认)"
+                              data-testid="ai-exec-sql"
+                            >
+                              <Play className="w-3 h-3" />
+                              <span>直接执行</span>
+                            </button>
+                          )}
                         </div>
                       </div>
                       <pre className="p-3 overflow-x-auto text-emerald-300 text-[11px] leading-relaxed whitespace-pre-wrap select-text">

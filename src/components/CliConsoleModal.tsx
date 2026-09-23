@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { executeSql } from '../services/ipc';
+import { executeSql , errToStr } from '../services/ipc';
 import { QueryResult } from '../types';
 import {
   Terminal,
@@ -40,6 +40,8 @@ export const CliConsoleModal: React.FC<CliConsoleModalProps> = ({
   onClose,
   onApplySqlToEditor,
 }) => {
+  // WP1: 待 y/N 内联确认的 Critical SQL
+  const [pendingCriticalSql, setPendingCriticalSql] = useState<{ sql: string } | null>(null);
   const [history, setHistory] = useState<CliHistoryItem[]>([
     {
       id: 'init_welcome',
@@ -147,14 +149,38 @@ export const CliConsoleModal: React.FC<CliConsoleModalProps> = ({
     }
 
     // 2. 真实数据库命令执行 (通过 Rust psql 元命令转译层与 SQL 引擎)
+    // WP1: 若上一条命令是待确认的 Critical SQL, 输入 y 则 force 重发, 其他输入取消
+    let sqlToRun = cmd;
+    let forceRun = false;
+    if (pendingCriticalSql) {
+      const pending = pendingCriticalSql;
+      setPendingCriticalSql(null);
+      if (cleanLower === 'y' || cleanLower === 'yes') {
+        sqlToRun = pending.sql;
+        forceRun = true;
+      } else {
+        setHistory((prev) => [
+          ...prev,
+          {
+            id: `cmd_${Date.now()}`,
+            command: cmd,
+            output: '已取消执行高危 SQL。',
+            timestamp: now,
+          },
+        ]);
+        setIsExecuting(false);
+        return;
+      }
+    }
+
     try {
-      const res = await executeSql(connId, cmd);
+      const res = await executeSql(connId, sqlToRun, forceRun);
       const formattedOutput = formatAsciiTable(res);
       setHistory((prev) => [
         ...prev,
         {
           id: `cmd_${Date.now()}`,
-          command: cmd,
+          command: forceRun ? `${sqlToRun}  (force-confirmed)` : cmd,
           output: formattedOutput,
           tableData: res,
           elapsedMs: res.elapsed_ms,
@@ -162,12 +188,29 @@ export const CliConsoleModal: React.FC<CliConsoleModalProps> = ({
         },
       ]);
     } catch (err: any) {
+      // WP1: Critical 拦截 → 终端风格内联确认提示 (文案与全局对话框逻辑一致)
+      if (err && err.code === 'SAFETY_BLOCKED' && err.requires_confirmation === true) {
+        setPendingCriticalSql({ sql: sqlToRun });
+        const reasons = (err.reasons || [err.message]).join('\n  ');
+        setHistory((prev) => [
+          ...prev,
+          {
+            id: `cmd_${Date.now()}`,
+            command: cmd,
+            output: `⚠ CRITICAL: ${reasons}\n确认执行请输入 y，其他任意输入取消:`,
+            isError: true,
+            timestamp: now,
+          },
+        ]);
+        setIsExecuting(false);
+        return;
+      }
       setHistory((prev) => [
         ...prev,
         {
           id: `cmd_${Date.now()}`,
           command: cmd,
-          output: `ERROR: ${err.message || String(err)}`,
+          output: `ERROR: ${errToStr(err)}`,
           isError: true,
           timestamp: now,
         },

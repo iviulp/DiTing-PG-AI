@@ -1,5 +1,31 @@
-import { invoke } from '@tauri-apps/api/core';
-import { ConnectionConfig, QueryResult, AiConfig } from '../types';
+import { invoke, Channel } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
+import { escapeSqlLiteral } from '../utils/sqlEscape';
+
+/**
+ * WP8-S3: 统一错误文案提取 — invoke reject 的是 AppErrorDto 普通对象,
+ * 直接 String(err) 会得 [object Object]。按契约 {code, message} 提取可读文案。
+ */
+export function errToStr(err: any): string {
+  if (err == null) return '(未知错误)';
+  if (typeof err === 'string') return err;
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object') {
+    const dto = err as Record<string, any>;
+    const msg = dto.message ?? dto.error ?? dto.msg;
+    if (typeof msg === 'string' && msg.trim()) {
+      return dto.code ? `${msg}（${dto.code}）` : msg;
+    }
+    if (typeof dto.code === 'string' && dto.code) return dto.code;
+    try {
+      const j = JSON.stringify(err);
+      if (j && j !== '{}') return j;
+    } catch { /* fallthrough */ }
+    return '(未知错误: 无 message/code 字段的错误对象)';
+  }
+  return String(err);
+}
 
 /**
  * 建立与注册数据库连接
@@ -9,17 +35,126 @@ export async function connectDb(config: ConnectionConfig): Promise<void> {
 }
 
 /**
- * 执行任意 SQL 语句并获取强类型结果集
+ * 执行任意 SQL 语句并获取强类型结果集 (低层原语)
+ * WP1: force=true 表示用户已确认 Critical 风险, 仅豁免确认策略, 不豁免 read_only
  */
-export async function executeSql(connId: string, sql: string): Promise<QueryResult> {
-  return await invoke('execute_sql', { connId, sql });
+export async function executeSql(connId: string, sql: string, force?: boolean): Promise<QueryResult> {
+  return await invoke('execute_sql', { connId, sql, force: force ?? null });
+}
+
+/** 判断 invoke 错误是否为需二次确认的 Critical 安全拦截 */
+export function isSafetyConfirmationError(err: any): err is SafetyBlockedPayload {
+  return (
+    err &&
+    typeof err === 'object' &&
+    err.code === 'SAFETY_BLOCKED' &&
+    err.requires_confirmation === true
+  );
 }
 
 /**
- * 触发 AI Agent 自然语言问答转 SQL
+ * WP1: 带 Critical 二次确认语义的统一执行封装 (唯一入口, 安全判定以后端为准)
+ * 流程: executeSql → 后端返回 SAFETY_BLOCKED+requires_confirmation → confirm(payload)
+ *       用户同意后携带原始 SQL (一字不改) + force=true 重发; 拒绝则抛出原错误。
+ * read_only 拦截 (无 requires_confirmation) 直接 throw, 不提供 force 通道。
  */
-export async function aiChat(prompt: string, schemaContext?: string): Promise<string> {
-  return await invoke('ai_chat', { prompt, schemaContext });
+export async function executeSqlWithGuard(
+  connId: string,
+  sql: string,
+  confirm: (payload: SafetyBlockedPayload) => Promise<boolean>
+): Promise<QueryResult> {
+  try {
+    return await executeSql(connId, sql);
+  } catch (err) {
+    if (isSafetyConfirmationError(err)) {
+      const approved = await confirm(err as SafetyBlockedPayload);
+      if (approved) {
+        // SEC 决议: 原始 sql 字符串原样重发, 前端不得改写
+        return await executeSql(connId, sql, true);
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * 触发 AI Agent 自然语言问答转 SQL (WP2: 支持多轮 history; 保留为流式降级 fallback)
+ */
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/** WP3: 隧道状态 (后端 TunnelState serde tag 形式) */
+export type TunnelState =
+  | { state: 'disconnected' }
+  | { state: 'connecting' }
+  | { state: 'authenticating' }
+  | { state: 'forwarding' }
+  | { state: 'closing' }
+  | { state: 'failed'; code: string; message: string };
+
+export async function getTunnelState(connId: string): Promise<TunnelState> {
+  return await invoke('get_tunnel_state', { connId });
+}
+
+export async function closeTunnel(connId: string): Promise<void> {
+  await invoke('close_tunnel', { connId });
+}
+
+/** WP3: 订阅隧道被动断开事件 (后端 emit "tunnel-disconnected", payload = conn_id) */
+export function onTunnelDisconnected(cb: (connId: string) => void): () => void {
+  const unlistenPromise = listen<string>('tunnel-disconnected', (event) => {
+    cb(event.payload);
+  });
+  return () => {
+    unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+  };
+}
+
+export async function aiChat(prompt: string, schemaContext?: string, history?: ChatMessage[]): Promise<string> {
+  return await invoke('ai_chat', { prompt, schemaContext, history: history ?? null });
+}
+
+/** WP2: 流式事件 (与后端 StreamEvent serde camelCase 对齐) */
+export type AiStreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'done'; fullText: string }
+  | { type: 'error'; message: string };
+
+/**
+ * WP2: AI 流式对话 — Tauri Channel 逐 delta 回调, resolve 完整文本;
+ * 后端返回 error 事件时 reject, 由调用方决定是否降级 aiChat。
+ */
+export async function aiChatStream(
+  prompt: string,
+  schemaContext: string | undefined,
+  history: ChatMessage[] | undefined,
+  onDelta: (text: string) => void
+): Promise<string> {
+  const channel = new Channel<AiStreamEvent>();
+  return await new Promise<string>((resolve, reject) => {
+    // WP9 防御: 前端自累积 delta 真实内容。后端 Done.fullText 契约异常时用它兜底,
+    // 避免 resolve(undefined) 导致调用方 reply.match() 崩溃 (AI 输出到半截报错)。
+    let accumulated = '';
+    channel.onmessage = (msg) => {
+      if (msg.type === 'delta') {
+        if (typeof msg.text === 'string') accumulated += msg.text;
+        onDelta(msg.text);
+      } else if (msg.type === 'done') {
+        if (typeof msg.fullText === 'string') {
+          resolve(msg.fullText);
+        } else {
+          // 契约防御: 不是假数据, 是已收到的真实流式内容
+          console.warn('[aiChatStream] Done 事件缺 fullText 字段 (serde 契约异常), 回退到流式累积内容');
+          resolve(accumulated);
+        }
+      } else if (msg.type === 'error') {
+        reject(new Error(msg.message));
+      }
+    };
+    invoke('ai_chat_stream', { prompt, schemaContext, history: history ?? null, channel }).catch(reject);
+  });
 }
 
 /**
@@ -40,15 +175,27 @@ export async function getTableSchema(connId: string): Promise<any[]> {
   return await invoke('get_table_schema', { connId });
 }
 
-export async function getTableColumnsMetaData(connId: string, tableName: string): Promise<any[]> {
+/**
+ * WP4 步骤4: 取表列元数据 (含注释)。
+ * - schema 参数化 (默认 public), 支持多 schema 同名表
+ * - WHERE 两个条件值过 escapeSqlLiteral (消除 tableName 注入面)
+ * - col_description 改用 format('%I.%I', ...)::regclass (原 %s.%s 不加引号, 特殊标识符会解析错)
+ */
+export async function getTableColumnsMetaData(
+  connId: string,
+  tableName: string,
+  schemaName: string = 'public'
+): Promise<any[]> {
+  const safeTable = escapeSqlLiteral(tableName);
+  const safeSchema = escapeSqlLiteral(schemaName);
   const sql = `
     SELECT 
       c.column_name, 
       c.data_type, 
       c.is_nullable,
-      pg_catalog.col_description(format('%s.%s', c.table_schema, c.table_name)::regclass::oid, c.ordinal_position) as column_comment
+      pg_catalog.col_description(format('%I.%I', c.table_schema, c.table_name)::regclass::oid, c.ordinal_position) as column_comment
     FROM information_schema.columns c
-    WHERE c.table_schema = 'public' AND c.table_name = '${tableName}'
+    WHERE c.table_schema = '${safeSchema}' AND c.table_name = '${safeTable}'
     ORDER BY c.ordinal_position;
   `;
   try {
@@ -100,27 +247,118 @@ export async function saveFileDirectly(dirPath: string | null, fileName: string,
 }
 
 /**
- * 导出经过高强加密的数据库连接与 AI 配置数据包
+ * WP6: 导出 v2 加密备份 (用户主密码 ≥8 位; 不再使用内置固定密钥)
  */
 export async function exportEncryptedBundle(
   connectionsJson: string,
   aiConfigJson: string,
+  masterPassword: string,
   saveDir?: string | null
 ): Promise<string> {
   return await invoke('export_encrypted_bundle', {
     connectionsJson,
     aiConfigJson,
+    masterPassword,
     saveDir: saveDir || null,
   });
 }
 
 /**
- * 导入加密数据包并自动解密 (密码: yuguosheng)
+ * WP6: 导入加密备份 — v2 需主密码; legacy v1 自动用旧密钥解密并返回 legacy_import:true
  */
-export async function importEncryptedBundle(fileContent: string): Promise<any> {
-  return await invoke('import_encrypted_bundle', { fileContent });
+export async function importEncryptedBundle(
+  fileContent: string,
+  masterPassword?: string | null
+): Promise<any> {
+  return await invoke('import_encrypted_bundle', {
+    fileContent,
+    masterPassword: masterPassword ?? null,
+  });
 }
 
+// ============ WP6: Vault 命令 (密码永不出 Rust 边界) ============
 
+/** 列出脱敏连接视图 (password_set 标记; 无明文密码) */
+export async function vaultListConnections(): Promise<ConnectionConfig[]> {
+  return await invoke('vault_list_connections');
+}
 
+/** 保存/更新连接 (加密落盘; 编辑时密码留空 → 后端保留原密码) */
+export async function vaultUpsertConnection(config: ConnectionConfig): Promise<void> {
+  return await invoke('vault_upsert_connection', { config });
+}
 
+/** 删除连接 */
+export async function vaultDeleteConnection(connId: string): Promise<void> {
+  return await invoke('vault_delete_connection', { connId });
+}
+
+/** WP6-S6: 按 conn_id 连接 — 后端从 vault 取真实密码 */
+export async function vaultConnectDb(connId: string): Promise<void> {
+  return await invoke('vault_connect_db', { connId });
+}
+
+/** WP6-S6: 一次性测试通道 (保存前测试; 密码留空自动合并 vault 原密码) */
+export async function vaultTestConnection(config: ConnectionConfig): Promise<void> {
+  return await invoke('vault_test_connection', { config });
+}
+
+export interface MigrateOutcome {
+  status: 'already_migrated' | 'migrated';
+  count?: number;
+  dirty_skipped?: number;
+}
+
+/** WP6-S7: 后端组装 payload (真实密码不出 Rust) → v2 主密码加密导出 */
+export async function vaultExportBundle(
+  masterPassword: string,
+  saveDir?: string | null
+): Promise<string> {
+  return await invoke('vault_export_bundle', {
+    masterPassword,
+    saveDir: saveDir ?? null,
+  });
+}
+
+/** WP6-S5: localStorage → vault 幂等迁移 */
+export async function vaultMigrateFromLocalStorage(
+  connectionsJson: string,
+  aiConfigJson?: string | null
+): Promise<MigrateOutcome> {
+  return await invoke('vault_migrate_from_localstorage', {
+    connectionsJson,
+    aiConfigJson: aiConfigJson ?? null,
+  });
+}
+
+/** WP10-S2: 主键列 (翻页稳定排序用) — 纯 SELECT 元数据查询 */
+export async function getPrimaryKeyColumns(
+  connId: string,
+  tableName: string,
+  schemaName: string = 'public'
+): Promise<string[]> {
+  const { buildPrimaryKeySql } = await import('../utils/browseSqlBuilder');
+  const sql = buildPrimaryKeySql(schemaName, tableName);
+  const res = await executeSql(connId, sql);
+  return (res?.rows || []).map((r: any[]) => String(r[0]?.val ?? ''));
+}
+
+/** WP10-S2: pg_class.reltuples 行数估算 — 立即显示"约 N 行", 精确 COUNT 后替换 */
+export async function getRelTuplesEstimate(
+  connId: string,
+  tableName: string,
+  schemaName: string = 'public'
+): Promise<number | null> {
+  const { buildRelTuplesSql } = await import('../utils/browseSqlBuilder');
+  const sql = buildRelTuplesSql(schemaName, tableName);
+  try {
+    const res = await executeSql(connId, sql);
+    const v = res?.rows?.[0]?.[0]?.val;
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    // reltuples = -1 表示从未 ANALYZE (PG14+), 视为不可用
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    return null; // 估算失败静默降级 — 精确 COUNT 仍是主通道 (非关键路径)
+  }
+}

@@ -90,7 +90,10 @@ export interface ConnectionConfig {
   host: string;
   port: number;
   user: string;
+  /** 明文密码仅出现在"新建/编辑表单提交"瞬时路径; vault 列表视图中恒为 undefined */
   password?: string;
+  /** WP6: vault 脱敏视图标记 — 后端已存有密码 (编辑留空即保留) */
+  password_set?: boolean;
   database: string;
   schema?: string;
   env_tag?: 'PROD' | 'DEV' | 'TEST';
@@ -105,6 +108,36 @@ export interface AiConfig {
   api_key: string;
   model_name: string;
   temperature: number;
+  /** WP2: 上下文 token 预算 */
+  max_context_tokens?: number;
+  /** WP2: 输出预留 token */
+  reserved_output_tokens?: number;
+  /** WP2: 脱敏视图尾4位 (仅展示用) */
+  key_tail4?: string | null;
+}
+
+/** WP2: get_ai_config 返回的脱敏视图 (不含完整 api_key) */
+export interface AiConfigView {
+  provider_name: string;
+  base_url: string;
+  model_name: string;
+  temperature: number;
+  max_context_tokens: number;
+  reserved_output_tokens: number;
+  has_key: boolean;
+  key_tail4?: string | null;
+}
+
+/** WP1: SQL 风险等级 (与后端 RiskLevel serde 小写对齐) */
+export type RiskLevel = 'safe' | 'warning' | 'critical';
+
+/** WP1: Tauri invoke reject 时后端 AppErrorDto 的结构化安全载荷 */
+export interface SafetyBlockedPayload {
+  code: string;
+  message: string;
+  risk_level?: RiskLevel;
+  requires_confirmation?: boolean;
+  reasons?: string[];
 }
 
 export interface SavedSqlSnippet {

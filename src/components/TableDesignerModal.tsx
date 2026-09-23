@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { TableColumnDetail } from '../types';
 import { Table, Plus, Trash2, Save, X, Key, ShieldCheck } from 'lucide-react';
+import { showAlert } from '../services/appDialog';
 
 interface TableDesignerModalProps {
   isOpen: boolean;
@@ -66,7 +67,7 @@ export const TableDesignerModal: React.FC<TableDesignerModalProps> = ({ isOpen, 
 
           <button
             onClick={() => {
-              alert(`Table Schema changes saved for ${tableName}!`);
+              showAlert(`Table Schema changes saved for ${tableName}!`);
               onClose();
             }}
             className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold flex items-center gap-1 shadow"

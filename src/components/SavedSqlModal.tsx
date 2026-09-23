@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { SavedSqlSnippet } from '../types';
+import { errToStr } from '../services/ipc';
+import { showAlert, showConfirm } from '../services/appDialog';
 import {
   Bookmark,
   Plus,
@@ -113,11 +115,11 @@ export const SavedSqlModal: React.FC<SavedSqlModalProps> = ({
 
   const handleSaveSnippet = () => {
     if (!formTitle.trim()) {
-      alert('请输入 SQL 脚本名称！');
+      showAlert('请输入 SQL 脚本名称！');
       return;
     }
     if (!formSql.trim()) {
-      alert('SQL 脚本内容不能为空！');
+      showAlert('SQL 脚本内容不能为空！');
       return;
     }
 
@@ -168,12 +170,13 @@ export const SavedSqlModal: React.FC<SavedSqlModalProps> = ({
       loadSnippets();
       setIsEditing(false);
     } catch (e: any) {
-      alert(`保存失败: ${e.message || String(e)}`);
+      showAlert(`保存失败: ${errToStr(e)}`, { title: '保存失败', danger: true });
     }
   };
 
-  const handleDeleteSnippet = (id: string, title: string) => {
-    if (!confirm(`确认要删除已存 SQL 脚本 "${title}" 吗？`)) return;
+  const handleDeleteSnippet = async (id: string, title: string) => {
+    const ok = await showConfirm(`确认要删除已存 SQL 脚本 "${title}" 吗？`, { title: '删除脚本', danger: true, confirmText: '删除' });
+    if (!ok) return;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       const all: SavedSqlSnippet[] = raw ? JSON.parse(raw) : [];
@@ -184,7 +187,7 @@ export const SavedSqlModal: React.FC<SavedSqlModalProps> = ({
         setSelectedSnippetId(null);
       }
     } catch (e: any) {
-      alert(`删除失败: ${e.message || String(e)}`);
+      showAlert(`删除失败: ${errToStr(e)}`, { title: '删除失败', danger: true });
     }
   };
 
@@ -489,10 +492,11 @@ export const SavedSqlModal: React.FC<SavedSqlModalProps> = ({
                     </button>
 
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         if (currentSql && currentSql.trim() && currentSql.trim() !== selectedSnippet.sql.trim()) {
-                          const confirmReplace = confirm(
-                            '⚠️ 覆盖确认提示：\n\n主编辑器当前有未保存的 SQL 内容。\n点击确定将【完全覆盖】当前编辑区。\n\n（提示：如需保留当前内容，建议点击【追加到末尾】或【保存当前 SQL】）。\n\n是否继续覆盖？'
+                          const confirmReplace = await showConfirm(
+                            '主编辑器当前有未保存的 SQL 内容。\n点击确定将【完全覆盖】当前编辑区。\n\n（提示：如需保留当前内容，建议点击【追加到末尾】或【保存当前 SQL】）。\n\n是否继续覆盖？',
+                            { title: '覆盖确认', danger: true, confirmText: '覆盖' }
                           );
                           if (!confirmReplace) return;
                         }

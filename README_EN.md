@@ -37,7 +37,9 @@ Traditional clients like Navicat, DBeaver, or DataGrip are bloated (Java JVM ove
 | **AI Integration** | None or naive generic Webview iframe | **Physical column pre-fetching + Intent routing + Self-healing** |
 | **Command Line (CLI)** | Requires external local `psql` installed | **100% offline embedded native psql REPL, zero dependencies** |
 | **Security & ACL** | Opaque privileges, easy to misconfigure | **7-dimensional table ACL matrix + SUPERUSER bypass warnings** |
-| **Vault & Migration** | Plaintext credentials | **Argon2id + AES-256-GCM encrypted `.ditingvault` backup** |
+| **Vault & Migration** | Plaintext credentials | **OS Keychain/KEK encrypted local store + master-password `.ditingvault` v2 backup** |
+| **SQL Safety** | Destructive statements run unchecked | **AST risk grading + production red-lines + Critical double-confirmation** |
+| **Intranet Tunneling** | Bring-your-own `ssh` CLI tunnels | **Built-in native SSH tunnels (russh): direct/bastion double-hop + TOTP** |
 
 ---
 
@@ -67,8 +69,29 @@ Traditional clients like Navicat, DBeaver, or DataGrip are bloated (Java JVM ove
 ### 5. 🔍 Real-Time Process & Lock Monitor
 - Live exploration of `pg_stat_activity`. Kill blocking transactions (`pg_terminate_backend`) with a single click.
 
-### 6. 🔐 Hardened Encryption Vault (.ditingvault)
-- Export full connection profiles, AI credentials, and saved SQL scripts with **Argon2id + AES-256-GCM**.
+### 6. 🚦 SQL Safety Pipeline (AST)
+- **AST-level risk grading**: every statement is parsed with sqlparser and classified `Safe / Caution / Critical`.
+- **Production red-lines**: write operations on read-only connections are hard-blocked (`force` cannot bypass read_only).
+- **Critical double-confirmation**: `DROP TABLE / TRUNCATE / DELETE without WHERE` require explicit confirmation — consistent in both the editor and the CLI console.
+
+### 7. 🌐 Built-in Native SSH Tunnels (russh)
+- **Zero-dependency tunneling**: no system openssh needed; pure-Rust direct single-hop and bastion double-hop port forwarding.
+- **Three auth modes**: password, private key (with passphrase), TOTP one-time codes (keyboard-interactive auto-answer).
+- **TOFU host-key trust**: fingerprint recorded on first connect; later mismatches hard-fail (MITM protection).
+
+### 8. 🔐 Encrypted Local Credential Store & Master-Password Backup
+- **Automatic encrypted migration**: on first launch, legacy plaintext localStorage connection profiles are absorbed into backend encrypted storage `~/.aidb/connections.enc` (macOS Keychain / KEK file derivation + HKDF domain separation + AES-256-GCM, 0600 perms). Plaintext is removed only after a verified successful migration.
+- **`.ditingvault` v2 backups**: export requires a ≥8-char master password (Argon2id + HKDF + AES-256-GCM). The master password is unrecoverable by design; legacy v1 bundles can still be imported (with a risk notice) and should be re-exported immediately.
+- **Zero plaintext API keys**: AI keys are encrypted at rest; the frontend only ever receives a masked view (`has_key` + last-4).
+
+### 9. 🎯 Type Fidelity & SSL
+- **Faithful rendering**: MySQL / SQLite results are no longer downgraded to strings — numbers, booleans, JSON and binary (hex, truncated) are restored via a 17-variant TypePlan; real `NULL` is distinguishable from the string `"NULL"`.
+- **SSL actually applied**: `ssl_mode` for PostgreSQL / MySQL is wired into the driver layer; remote hosts default to `require`, loopback defaults to `disable` (backwards compatible).
+
+### 10. 💬 Multi-turn AI Chat & Streaming
+- **Session-level history**: conversation context travels with each request; early history is auto-truncated under a token budget.
+- **SSE token streaming**: delta push over Tauri 2.0 Channels with automatic fallback to non-streaming mode.
+- **OpenAI-compatible**: works with any `/chat/completions`-compatible backend.
 
 ---
 

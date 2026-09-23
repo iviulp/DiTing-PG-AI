@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Group, Panel, Separator } from 'react-resizable-panels';
+import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
+import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
+import { explainPgError } from './utils/pgErrorHints';
+import { ShortcutsHelpModal } from './components/ShortcutsHelpModal';
+import { ColumnMetaLite } from './components/FilterBuilder';
+import { getTableColumnsMetaData } from './services/ipc';
 import { useAppStore } from './store/useAppStore';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { SqlEditor } from './components/SqlEditor';
@@ -13,10 +18,18 @@ import { ExportWizardModal } from './components/ExportWizardModal';
 import { UserManagementModal } from './components/UserManagementModal';
 import { SavedSqlModal } from './components/SavedSqlModal';
 import { CliConsoleModal } from './components/CliConsoleModal';
+import { SafetyConfirmDialog } from './components/SafetyConfirmDialog';
 
 
 import { ConnectionConfig } from './types';
-import { connectDb, executeSql } from './services/ipc';
+import { executeSql, executeSqlWithGuard, onTunnelDisconnected, vaultConnectDb, vaultUpsertConnection, errToStr } from './services/ipc';
+import { mapTunnelError } from './utils/tunnelError';
+import { showAlert } from './services/appDialog';
+import {
+  quoteIdentifier,
+  sanitizeIdentifier,
+  escapeSqlLiteral
+} from './utils/sqlEscape';
 import {
   Database,
   Play,
@@ -51,7 +64,13 @@ export const App: React.FC = () => {
     errorMsg,
     loadAiConfig,
     aiConfig,
-    setAiConfig
+    setAiConfig,
+    pendingSafetyConfirm,
+    resolveSafetyConfirm,
+    browseTable,
+    runQueryPaged,
+    pagingSetFilters,
+    clearPaging
   } = useAppStore();
 
   const [inWorkspace, setInWorkspace] = useState(false);
@@ -62,6 +81,11 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSavedSqlOpen, setIsSavedSqlOpen] = useState(false);
   const [isCliConsoleOpen, setIsCliConsoleOpen] = useState(false);
+  // WP9-P2-9: 快捷键与功能速查表
+  const [isShortcutsHelpOpen, setIsShortcutsHelpOpen] = useState(false);
+  // WP10: 过滤构建器 (浏览表模式)
+  const [isFilterBuilderOpen, setIsFilterBuilderOpen] = useState(false);
+  const [browseColumns, setBrowseColumns] = useState<ColumnMetaLite[]>([]);
   const [tempAiConfig, setTempAiConfig] = useState(aiConfig);
 
   // New Management Modals State
@@ -74,11 +98,60 @@ export const App: React.FC = () => {
 
   const [designerTable, setDesignerTable] = useState('users');
 
+  // WP9-P1-9: 面板布局持久化 (react-resizable-panels v4 useDefaultLayout + localStorage)
+  const mainLayout = useDefaultLayout({ id: 'aidb-main-h', storage: localStorage });
+  const centerLayout = useDefaultLayout({ id: 'aidb-center-v', storage: localStorage });
 
+  // WP9-P1-1: 全局快捷键 (抽取为可测 hook: Esc 关最上层弹窗 / Cmd+B 切 AI 侧栏 / Cmd+R 执行 SQL)
+  useGlobalShortcuts({
+    modals: [
+      { isOpen: isFilterBuilderOpen, close: () => setIsFilterBuilderOpen(false) },
+      { isOpen: isShortcutsHelpOpen, close: () => setIsShortcutsHelpOpen(false) },
+      { isOpen: isUserMgmtOpen, close: () => setIsUserMgmtOpen(false) },
+      { isOpen: isProcessModalOpen, close: () => setIsProcessModalOpen(false) },
+      { isOpen: isDesignerOpen, close: () => setIsDesignerOpen(false) },
+      { isOpen: isExportOpen, close: () => setIsExportOpen(false) },
+      { isOpen: isSavedSqlOpen, close: () => setIsSavedSqlOpen(false) },
+      { isOpen: isCliConsoleOpen, close: () => setIsCliConsoleOpen(false) },
+      { isOpen: isSettingsOpen, close: () => setIsSettingsOpen(false) },
+      { isOpen: isConnModalOpen, close: () => setIsConnModalOpen(false) },
+    ],
+    onExecute: (selectedSql?: string) => handleExecuteRef.current?.(selectedSql),
+    onToggleAiSidebar: () => setIsAiSidebarOpen((v) => !v),
+    // WP10: Cmd+←/→ 翻页 (分页模式且非加载态才处理; 返回 false 让 hook 不 preventDefault)
+    onPage: (delta) => {
+      const p = useAppStore.getState().paging;
+      if (!p || p.loading) return false;
+      const goto = useAppStore.getState().pagingGotoPage;
+      goto(Math.max(1, p.page + delta));
+      return true;
+    },
+  });
+
+  // ref 同步: 每次 render 指向最新 handleExecute (定义在其下方, 但 effect 在 render 后执行故安全)
+  useEffect(() => {
+    handleExecuteRef.current = handleExecute;
+  });
+
+
+
+  // WP6: 启动引导 — localStorage 迁移 + 从 vault 拉取脱敏连接列表
+  useEffect(() => {
+    useAppStore.getState().bootstrapVaultData();
+  }, []);
 
   useEffect(() => {
     loadAiConfig();
   }, [loadAiConfig]);
+
+  // WP3: 监听隧道被动断开事件 → 显示断开角标 (重连成功后清除)
+  const [tunnelDownConns, setTunnelDownConns] = useState<string[]>([]);
+  useEffect(() => {
+    const unlisten = onTunnelDisconnected((connId) => {
+      setTunnelDownConns((prev) => (prev.includes(connId) ? prev : [...prev, connId]));
+    });
+    return unlisten;
+  }, []);
 
   const activeConn = connections.find((c) => c.id === activeConnId);
   const [databases, setDatabases] = useState<string[]>([]);
@@ -103,15 +176,24 @@ export const App: React.FC = () => {
     // 进入工作区时重置默认 SQL，避免上一次执行残留或语法误判
     setSqlText(`-- Connected to: ${conn.name} (${conn.database})\nSELECT * FROM "information_schema"."tables" WHERE table_schema NOT IN ('information_schema', 'pg_catalog') LIMIT 50;`);
     try {
-      await connectDb(conn);
+      // WP6-S6: conn_id 寻址, 后端从 vault 取真实密码
+      await vaultConnectDb(conn.id);
       useAppStore.setState({ errorMsg: null, queryResult: null });
       setInWorkspace(true);
+      // WP3: 重连成功 → 清除隧道断开角标
+      setTunnelDownConns((prev) => prev.filter((id) => id !== conn.id));
       await fetchDatabases(conn);
     } catch (err: any) {
+      const rawMsg = errToStr(err);
+      // WP3: 隧道错误码 → 友好中文文案 (code 形如 TUNNEL_AUTH_FAILED: xxx)
+      const tunnelCodeMatch = rawMsg.match(/TUNNEL_[A-Z_]+/);
+      const displayMsg = tunnelCodeMatch
+        ? mapTunnelError(tunnelCodeMatch[0], rawMsg)
+        : rawMsg;
       useAppStore.setState({
-        errorMsg: `Failed to open connection "${conn.name}": ${err.message || String(err)}`
+        errorMsg: `Failed to open connection "${conn.name}": ${displayMsg}`
       });
-      alert(`⛔ 数据库连接拒绝 (FATAL Error)：\n无法建立到 "${conn.name}" 的连接。\n原因：${err.message || String(err)}`);
+      showAlert(`数据库连接拒绝 (FATAL Error)：\n无法建立到 "${conn.name}" 的连接。\n原因：${displayMsg}`, { title: '连接失败', danger: true });
       throw err;
     }
   };
@@ -120,12 +202,13 @@ export const App: React.FC = () => {
     if (!activeConn || newDb === activeDatabase) return;
     try {
       const updatedConfig = { ...activeConn, database: newDb };
-      await connectDb(updatedConfig);
+      // WP6: 先加密落盘新 database, 再按 conn_id 重连 (密码不经前端)
+      await vaultUpsertConnection(updatedConfig);
+      await vaultConnectDb(updatedConfig.id);
       setActiveDatabase(newDb);
-      // 同时更新当前连接对象的内存配置
       await updateConnection(updatedConfig);
     } catch (err: any) {
-      alert(`切换数据库到 [${newDb}] 失败：\n${err.message || String(err)}`);
+      showAlert(`切换数据库到 [${newDb}] 失败：\n${errToStr(err)}`, { title: '切换失败', danger: true });
     }
   };
 
@@ -149,6 +232,8 @@ export const App: React.FC = () => {
     return clean.trim();
   };
 
+  // WP9-P1-1: 快捷键层通过 ref 调用最新 handleExecute (避免 effect 依赖爆炸)
+  const handleExecuteRef = React.useRef<((selectedSql?: string) => Promise<void>) | null>(null);
   const handleExecute = async (selectedSql?: string) => {
     // 优先获取选中的 SQL；若未选中，则取主编辑区全部文本
     const sourceSql = (selectedSql !== undefined ? selectedSql : sqlText).trim();
@@ -157,10 +242,18 @@ export const App: React.FC = () => {
     const cleanSql = stripSqlComments(sourceSql);
 
     if (!cleanSql) {
-      alert('💡 提示：当前有效 SQL 内容为空（或全为注释代码），请输入有效 SQL 语句后再执行！');
+      showAlert('当前有效 SQL 内容为空（或全为注释代码），请输入有效 SQL 语句后再执行！');
       return;
     }
     if (!activeConnId) return;
+
+    // WP1: Critical 高危 SQL 通过全局确认框征得用户批准 (安全判定以后端为准)
+    const confirmCritical = (payload: import('./types').SafetyBlockedPayload) =>
+      new Promise<boolean>((resolve) => {
+        useAppStore.setState({
+          pendingSafetyConfirm: { connId: activeConnId, sql: cleanSql, payload, resolve }
+        });
+      });
 
     // 按分号 split 解析出多条独立的有效 SQL 语句
     const sqlStatements = cleanSql
@@ -171,12 +264,23 @@ export const App: React.FC = () => {
     if (sqlStatements.length === 0) return;
 
     if (sqlStatements.length === 1) {
-      // 只有一条语句：按单查询流程执行并直接刷新主 DataGrid
+      // 只有一条语句：按单查询流程执行并直接刷新主 DataGrid (runQuery 内部已带 guard)
       setResultTabs([]);
       setActiveResultTabId('');
-      runQuery(sqlStatements[0]);
+      // WP10-D2 (用户拍板): 手写单条 SELECT 也自动分页 —
+      // buildHandwrittenPaging 判定支持则走分页通道 (COUNT+LIMIT/OFFSET);
+      // 不支持 (写操作/多语句/FOR UPDATE) 内部自动回退 runQuery, 原因已 console 明示
+      const stmt = sqlStatements[0];
+      const head = stmt.trim().toUpperCase();
+      if (head.startsWith('SELECT') || head.startsWith('WITH')) {
+        runQueryPaged(stmt);
+      } else {
+        clearPaging(); // 写操作退出分页模式
+        runQuery(stmt);
+      }
     } else {
       // 包含多条语句：逐条拆分执行并构建 Result Tabs 选项卡
+      clearPaging(); // WP10: 多语句不分页, 退出分页模式
       useAppStore.setState({ isExecuting: true, errorMsg: null });
       const newTabs: import('./types').QueryResultTabItem[] = [];
 
@@ -187,7 +291,7 @@ export const App: React.FC = () => {
         const titleName = fromMatch ? fromMatch[1] : `Query #${i + 1}`;
 
         try {
-          const res = await executeSql(activeConnId, stmt);
+          const res = await executeSqlWithGuard(activeConnId, stmt, confirmCritical);
           newTabs.push({
             id: `tab_${i}_${Date.now()}`,
             title: titleName,
@@ -201,7 +305,7 @@ export const App: React.FC = () => {
             title: `${titleName} (Err)`,
             sql: stmt,
             result: null,
-            error: err.message || String(err)
+            error: errToStr(err)
           });
         }
       }
@@ -227,12 +331,7 @@ export const App: React.FC = () => {
     } else {
       await addConnection(config);
     }
-    // 强制调用 connectDb 刷新后端 Rust 注册池中的 ReadOnly 配置
-    try {
-      await connectDb(config);
-    } catch (err: any) {
-      console.warn('Backend connectDb refresh warning:', err);
-    }
+    // WP6: addConnection/updateConnection 内部已 vaultConnectDb 刷新注册池 (含 read_only)
     setEditingConn(null);
     setIsDuplicateModal(false);
   };
@@ -326,9 +425,9 @@ export const App: React.FC = () => {
                   <label className="block text-slate-400 mb-1">API Key</label>
                   <input
                     type="password"
-                    value={tempAiConfig.api_key}
+                    value={tempAiConfig.api_key === '__KEEP__' ? '' : tempAiConfig.api_key}
                     onChange={(e) => setTempAiConfig({ ...tempAiConfig, api_key: e.target.value })}
-                    placeholder="sk-..."
+                    placeholder={tempAiConfig.key_tail4 ? `已保存 (****${tempAiConfig.key_tail4})，留空则不修改` : 'sk-...'}
                     className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded text-slate-100"
                   />
                 </div>
@@ -401,6 +500,21 @@ export const App: React.FC = () => {
           >
             <Database className="w-4 h-4 text-blue-400" />
             <span>{activeConn?.name}</span>
+            {/* WP3: 隧道断开角标 */}
+            {activeConn && tunnelDownConns.includes(activeConn.id) && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // WP9-P1-8: 一键重连 — 复用完整连接流程 (重建 SSH 隧道 + DB 连接)
+                  handleSelectConnection(activeConn);
+                }}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-400 text-[10px] font-bold hover:bg-red-500/30 hover:text-red-300 transition-colors cursor-pointer"
+                title="SSH 隧道已断开 — 点击一键重连"
+                data-testid="tunnel-reconnect"
+              >
+                ⟳ 隧道断开·点击重连
+              </button>
+            )}
           </div>
 
           {/* Database Switcher */}
@@ -501,6 +615,16 @@ export const App: React.FC = () => {
             <span>Export</span>
           </button>
 
+          {/* WP9-P2-9: 快捷键与功能速查表 */}
+          <button
+            onClick={() => setIsShortcutsHelpOpen(true)}
+            className="p-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-slate-300"
+            title="快捷键与功能速查 (?)"
+            data-testid="shortcuts-help-btn"
+          >
+            <span className="text-xs font-bold leading-none">?</span>
+          </button>
+
           <button
             onClick={() => {
               setTempAiConfig(aiConfig);
@@ -524,15 +648,35 @@ export const App: React.FC = () => {
 
       {/* Error Alert Banner */}
       {errorMsg && (
-        <div className="bg-red-900/80 border-b border-red-700 text-red-200 px-4 py-1.5 text-xs flex justify-between items-center">
-          <span>⚠️ {errorMsg}</span>
-          <button onClick={() => useAppStore.setState({ errorMsg: null })}>✕</button>
+        <div className="bg-red-900/80 border-b border-red-700 text-red-200 px-4 py-1.5 text-xs flex justify-between items-center gap-3">
+          <span className="truncate font-mono" title={explainPgError(errorMsg) ? `${errorMsg}\n\n💡 ${explainPgError(errorMsg)!.explain} ${explainPgError(errorMsg)!.suggestion}` : errorMsg}>
+            ⚠️ {errorMsg}
+            {explainPgError(errorMsg) && (
+              <span className="ml-2 text-red-300/80 font-sans" data-testid="banner-error-hint">💡 {explainPgError(errorMsg)!.explain}</span>
+            )}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {/* WP9-P2-5: 闭环入口 — 打开 AI 侧栏 (侧栏内 currentError 驱动"一键修复此错误") */}
+            <button
+              onClick={() => setIsAiSidebarOpen(true)}
+              className="px-2 py-0.5 bg-red-700/60 hover:bg-red-600 rounded text-[10px] font-bold text-red-100 border border-red-500/50 transition-colors"
+              data-testid="ai-explain-error"
+              title="打开 AI 侧栏分析并修复此错误"
+            >
+              🤖 让 AI 解释此错误
+            </button>
+            <button onClick={() => useAppStore.setState({ errorMsg: null })}>✕</button>
+          </div>
         </div>
       )}
 
       {/* Main Workspace Layout (全自由 0-100% 拖拽编排) */}
       <div className="flex-1 overflow-hidden">
-        <Group orientation="horizontal">
+        <Group
+          orientation="horizontal"
+          defaultLayout={mainLayout.defaultLayout}
+          onLayoutChanged={mainLayout.onLayoutChanged}
+        >
           {/* Left Pane: Schema Tree Explorer */}
           <Panel defaultSize={20} minSize={0}>
             <SchemaTree
@@ -542,8 +686,20 @@ export const App: React.FC = () => {
               selectedTable={designerTable}
               onSelectTable={(tbl) => {
                 setDesignerTable(tbl);
-                setSqlText(`SELECT * FROM "${tbl}" LIMIT 100;`);
-                runQuery(`SELECT * FROM "${tbl}" LIMIT 100;`);
+                // WP10: 单击表 → 浏览表模式 (估算→COUNT→第1页, 翻页自动发 SQL)
+                const [schema, table] = tbl.includes('.')
+                  ? [tbl.split('.')[0], tbl.split('.').slice(1).join('.')]
+                  : ['public', tbl];
+                setSqlText(`SELECT * FROM ${tbl.includes('.') ? tbl.split('.').map((seg) => quoteIdentifier(seg)).join('.') : quoteIdentifier(tbl)};`); // WP10: 不带 LIMIT — 分页条自动接管 (COUNT+LIMIT/OFFSET)
+                browseTable(schema, table);
+                // 列元数据异步带出 (FilterBuilder 列名下拉用)
+                getTableColumnsMetaData(activeConnId || '', table, schema)
+                  .then((cols) => setBrowseColumns((cols || []).map((c: any) => ({
+                    column_name: c.column_name ?? String(c[0]?.val ?? ''),
+                    data_type: c.data_type ?? String(c[1]?.val ?? ''),
+                    column_comment: c.column_comment ?? (c[3]?.val ?? null),
+                  }))))
+                  .catch(() => setBrowseColumns([])); // 元数据失败 → FilterBuilder 内明示, 不假数据
               }}
               onDesignTable={(tbl) => {
                 setDesignerTable(tbl);
@@ -559,6 +715,24 @@ export const App: React.FC = () => {
                 setExportMode('ddl');
                 setIsExportOpen(true);
               }}
+              onBrowseTable={(tbl) => {
+                // WP10: 右键"分页浏览与过滤" — 与单击同链路 + 直接开过滤构建器
+                setDesignerTable(tbl);
+                const [schema, table] = tbl.includes('.')
+                  ? [tbl.split('.')[0], tbl.split('.').slice(1).join('.')]
+                  : ['public', tbl];
+                browseTable(schema, table);
+                getTableColumnsMetaData(activeConnId || '', table, schema)
+                  .then((cols) => {
+                    setBrowseColumns((cols || []).map((c: any) => ({
+                      column_name: c.column_name ?? String(c[0]?.val ?? ''),
+                      data_type: c.data_type ?? String(c[1]?.val ?? ''),
+                      column_comment: c.column_comment ?? (c[3]?.val ?? null),
+                    })));
+                    setIsFilterBuilderOpen(true);
+                  })
+                  .catch(() => setBrowseColumns([]));
+              }}
             />
 
 
@@ -569,7 +743,11 @@ export const App: React.FC = () => {
 
           {/* Center Pane: Monaco SQL Editor + Data Grid Split Pane */}
           <Panel defaultSize={55} minSize={0}>
-            <Group orientation="vertical">
+            <Group
+              orientation="vertical"
+              defaultLayout={centerLayout.defaultLayout}
+              onLayoutChanged={centerLayout.onLayoutChanged}
+            >
               {/* Top Half: Monaco SQL Editor */}
               <Panel defaultSize={45} minSize={0}>
                 <div className="h-full w-full bg-[#111318]">
@@ -588,6 +766,7 @@ export const App: React.FC = () => {
                 <div className="h-full w-full bg-[#0d0f14]">
                   <DataGrid
                     result={queryResult}
+                    error={errorMsg}
                     resultTabs={resultTabs}
                     activeTabId={activeResultTabId}
                     onSelectTab={(tabId) => {
@@ -603,44 +782,57 @@ export const App: React.FC = () => {
                     }}
                     isExecuting={isExecuting}
                     tableName={designerTable || 'table'}
+                    filterColumns={browseColumns}
+                    filterPanelOpen={isFilterBuilderOpen}
+                    onFilterPanelOpenChange={setIsFilterBuilderOpen}
+                    onApplyFilters={(filters, combinator) => { pagingSetFilters(filters, combinator); }}
                     onCommitChanges={async ({ edits, addedRows, deletedRowIndices }) => {
                       if (!queryResult || !activeConnId) return;
 
                       // 尝试定位表名 (从 sqlText 中正则匹配 SELECT ... FROM "tableName" 或 tableName)
-                      const fromMatch = sqlText.match(/FROM\s+["`']?([a-zA-Z0-9_.]+ Vacation|["`']?[a-zA-Z0-9_.]+)["`']?/i) || sqlText.match(/FROM\s+["`']?([a-zA-Z0-9_]+)/i);
+                      const fromMatch = sqlText.match(/FROM\s+["`']?([a-zA-Z0-9_.]+)["`']?/i);
                       let targetTable = fromMatch ? fromMatch[1].replace(/["`']/g, '') : null;
                       if (!targetTable || targetTable.toLowerCase() === 'dual') {
                         targetTable = designerTable;
                       }
 
                       if (!targetTable) {
-                        alert('无法从当前查询或选中数据集中自动匹配目标数据表，请确认查询语句包含 FROM 对应数据表。');
+                        showAlert('无法从当前查询或选中数据集中自动匹配目标数据表，请确认查询语句包含 FROM 对应数据表。');
                         return;
                       }
 
                       // 寻找主键列 (默认为 id 列，或第一列)
                       const pkCol = queryResult.columns.find((c) => c.name.toLowerCase() === 'id') || queryResult.columns[0];
                       if (!pkCol) {
-                        alert('未检测到唯一标识列 (如 id)，无法生成精确的回写 SQL。');
+                        showAlert('未检测到唯一标识列 (如 id)，无法生成精确的回写 SQL。');
                         return;
                       }
 
-                      // 安全脱敏辅助工具：转义表名/列名中的双引号，防止 SQL 注入
-                      const sanitizeIdentifier = (name: string) => name.replace(/"/g, '""');
-                      const escapeSqlString = (str: string) => str.replace(/'/g, "''");
-
-                      const cleanTable = sanitizeIdentifier(targetTable);
+                      // WP4 步骤5: 删除局部转义函数, 统一使用 src/utils/sqlEscape.ts (含控制字符拒绝)
+                      let cleanTable: string;
+                      try {
+                        cleanTable = sanitizeIdentifier(targetTable);
+                      } catch (e: any) {
+                        showAlert(`目标表名含非法字符, 无法生成回写 SQL: ${errToStr(e)}`, { title: 'SQL 生成失败', danger: true });
+                        return;
+                      }
                       const cleanPkCol = sanitizeIdentifier(pkCol.name);
+                      // 值转义: 数字须为有限数 (排除 NaN/Infinity), 否则走字符串转义路径
+                      const sqlVal = (v: unknown): string =>
+                        typeof v === 'number' && Number.isFinite(v)
+                          ? String(v)
+                          : `'${escapeSqlLiteral(String(v))}'`;
 
                       const sqlStatements: string[] = [];
-
+                      // WP4 会议八 P1: 值含控制字符被 escapeSqlLiteral 拒绝时 → 提示且不丢编辑态
+                      try {
                       // 1. 处理删除行 (DELETE FROM "tbl" WHERE "id" = val)
                       deletedRowIndices.forEach((rIdx) => {
                         const row = queryResult.rows[rIdx];
                         if (row) {
                           const pkCell = row.find((_, cIdx) => queryResult.columns[cIdx]?.name === pkCol.name);
                           if (pkCell) {
-                            const val = typeof pkCell.val === 'number' ? pkCell.val : `'${escapeSqlString(String(pkCell.val))}'`;
+                            const val = sqlVal(pkCell.val);
                             sqlStatements.push(`DELETE FROM "${cleanTable}" WHERE "${cleanPkCol}" = ${val};`);
                           }
                         }
@@ -666,13 +858,13 @@ export const App: React.FC = () => {
                           const key = `${rIdx}_${col.name}`;
                           if (key in edits) {
                             const newVal = edits[key];
-                            const formattedVal = newVal === 'NULL' ? 'NULL' : `'${escapeSqlString(newVal)}'`;
+                            const formattedVal = newVal === 'NULL' ? 'NULL' : sqlVal(newVal);
                             setClauses.push(`"${sanitizeIdentifier(col.name)}" = ${formattedVal}`);
                           }
                         });
 
                         if (setClauses.length > 0) {
-                          const pkVal = typeof pkCell.val === 'number' ? pkCell.val : `'${escapeSqlString(String(pkCell.val))}'`;
+                          const pkVal = sqlVal(pkCell.val);
                           sqlStatements.push(`UPDATE "${cleanTable}" SET ${setClauses.join(', ')} WHERE "${cleanPkCol}" = ${pkVal};`);
                         }
                       });
@@ -684,23 +876,27 @@ export const App: React.FC = () => {
                         Object.entries(rowMap).forEach(([colName, val]) => {
                           if (val !== undefined && val !== '') {
                             cols.push(`"${sanitizeIdentifier(colName)}"`);
-                            vals.push(`'${escapeSqlString(val)}'`);
+                            vals.push(sqlVal(val));
                           }
                         });
                         if (cols.length > 0) {
                           sqlStatements.push(`INSERT INTO "${cleanTable}" (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
                         }
                       });
+                      } catch (e: any) {
+                        showAlert(`变更值含非法字符, 未生成回写 SQL (编辑内容已保留): ${errToStr(e)}`, { title: 'SQL 生成失败', danger: true });
+                        return;
+                      }
 
                       if (sqlStatements.length > 0) {
                         try {
                           for (const stmt of sqlStatements) {
                             await runQuery(stmt);
                           }
-                          alert(`成功将 ${sqlStatements.length} 条变更写入数据库！`);
+                          showAlert(`成功将 ${sqlStatements.length} 条变更写入数据库！`, { title: '写入成功' });
                           await runQuery(sqlText);
                         } catch (err: any) {
-                          alert(`数据库执行变更失败: ${err.message || String(err)}`);
+                          showAlert(`数据库执行变更失败: ${errToStr(err)}`, { title: '执行失败', danger: true });
                         }
                       }
                     }}
@@ -717,6 +913,7 @@ export const App: React.FC = () => {
               <Panel defaultSize={25} minSize={0}>
                 <AiSidebar
                   onInsertSql={(sql) => setSqlText(sql)}
+                  onExecuteSql={(sql) => handleExecute(sql)}
                   currentSql={sqlText}
                   currentError={errorMsg}
                   activeDatabase={activeDatabase || activeConn?.database}
@@ -864,9 +1061,9 @@ export const App: React.FC = () => {
                 <label className="block text-slate-400 mb-1">API Key</label>
                 <input
                   type="password"
-                  value={tempAiConfig.api_key}
+                  value={tempAiConfig.api_key === '__KEEP__' ? '' : tempAiConfig.api_key}
                   onChange={(e) => setTempAiConfig({ ...tempAiConfig, api_key: e.target.value })}
-                  placeholder="sk-..."
+                  placeholder={tempAiConfig.key_tail4 ? `已保存 (****${tempAiConfig.key_tail4})，留空则不修改` : 'sk-...'}
                   className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded text-slate-100"
                 />
               </div>
@@ -903,6 +1100,21 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* WP1: 全局 Critical 高危 SQL 二次确认对话框 */}
+      {pendingSafetyConfirm && (
+        <SafetyConfirmDialog
+          payload={pendingSafetyConfirm.payload}
+          sql={pendingSafetyConfirm.sql}
+          connName={connections.find((c) => c.id === pendingSafetyConfirm.connId)?.name}
+          envTag={connections.find((c) => c.id === pendingSafetyConfirm.connId)?.env_tag}
+          onApprove={() => resolveSafetyConfirm(true)}
+          onReject={() => resolveSafetyConfirm(false)}
+        />
+      )}
+      {/* WP9-P2-9: 快捷键与功能速查表 */}
+      <ShortcutsHelpModal isOpen={isShortcutsHelpOpen} onClose={() => setIsShortcutsHelpOpen(false)} />
+
     </div>
   );
 };

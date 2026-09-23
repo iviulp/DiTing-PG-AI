@@ -1,9 +1,12 @@
-/// Tauri 2.0 IPC Command 控制器层
-/// 接收 React GUI 提交的请求，负责参数校验并调用后端服务处理
+//! Tauri 2.0 IPC Command 控制器层
+//! 接收 React GUI 提交的请求，负责参数校验并调用后端服务处理
 use crate::error::AppError;
 use crate::models::{ConnectionConfig, DbValue, QueryResult};
-use crate::services::ai_service::{AiConfig, AiService};
+use crate::services::ai_service::{AiConfig, AiConfigView, AiService, ChatMessage, StreamEvent};
 use crate::services::db_service::DbService;
+use crate::services::vault_service::{
+    AiConfigVaultView, ConnectionView, MigrateOutcome, VaultService,
+};
 use serde::Serialize;
 use tauri::State;
 
@@ -35,15 +38,181 @@ pub async fn connect_db(
     db_service.connect(config).await
 }
 
+// ============ WP6-S5/S6: Vault 命令组 (密码永不出 Rust 边界) ============
+
+/// 列出脱敏连接视图 (前端唯一列表数据源; 不含明文密码)
+#[tauri::command]
+pub async fn vault_list_connections(
+    vault: State<'_, VaultService>,
+) -> Result<Vec<ConnectionView>, AppError> {
+    vault
+        .list_connections()
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// 保存/更新连接 (密码随配置加密落盘; 留空密码 → 保留原值)
+#[tauri::command]
+pub async fn vault_upsert_connection(
+    config: ConnectionConfig,
+    vault: State<'_, VaultService>,
+) -> Result<(), AppError> {
+    vault
+        .upsert_connection(config)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// 删除连接
+#[tauri::command]
+pub async fn vault_delete_connection(
+    conn_id: String,
+    vault: State<'_, VaultService>,
+) -> Result<(), AppError> {
+    vault
+        .delete_connection(&conn_id)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// WP6-S6: 按 conn_id 连接 — 后端从 vault 取真实密码, 前端不接触
+#[tauri::command]
+pub async fn vault_connect_db(
+    conn_id: String,
+    vault: State<'_, VaultService>,
+    db_service: State<'_, DbService>,
+) -> Result<(), AppError> {
+    let config = vault
+        .get_connection_secret(&conn_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    db_service.connect(config).await
+}
+
+/// WP6-S6: 一次性测试通道 — 保存前测试新配置 (密码留空时从 vault 合并原密码)
+#[tauri::command]
+pub async fn vault_test_connection(
+    mut config: ConnectionConfig,
+    vault: State<'_, VaultService>,
+    db_service: State<'_, DbService>,
+) -> Result<(), AppError> {
+    if config.password.as_ref().map(|p| p.is_empty()).unwrap_or(true) {
+        // 编辑场景留空密码: 从 vault 取原密码合并 (取不到则保持 None)
+        if let Ok(stored) = vault.get_connection_secret(&config.id) {
+            config.password = stored.password;
+        }
+    }
+    db_service.connect(config).await
+}
+
+/// WP6-S5: localStorage 迁移 — 幂等 (enc 已有数据 → already_migrated); 脏条目跳过计数
+#[tauri::command]
+pub async fn vault_migrate_from_localstorage(
+    connections_json: String,
+    ai_config_json: Option<String>,
+    vault: State<'_, VaultService>,
+) -> Result<MigrateOutcome, AppError> {
+    // 1. 解析连接 (容忍脏 JSON → 视为空列表)
+    let configs: Vec<ConnectionConfig> =
+        serde_json::from_str(&connections_json).unwrap_or_default();
+
+    // 2. AI 配置迁移 (仅首次: vault 无配置且传入非空; 旧 localStorage 不含 api_key)
+    if let Some(ai_json) = ai_config_json {
+        if !ai_json.trim().is_empty() {
+            if let Ok(parsed) =
+                serde_json::from_str::<crate::services::vault_service::StoredAiConfig>(&ai_json)
+            {
+                let vault_empty = vault
+                    .get_ai_config()
+                    .map(|c| c.provider_name.is_empty() && c.base_url.is_empty())
+                    .unwrap_or(true);
+                if vault_empty {
+                    let _ = vault.set_ai_config(parsed);
+                }
+            }
+        }
+    }
+
+    // 3. 连接迁移 (幂等在 VaultService::migrate_connections 内保证)
+    vault
+        .migrate_connections(configs)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// WP6-S7: 后端组装导出 payload (含真实密码) → v2 主密码加密 → 保存
+/// 明文密码只在 Rust 进程内存中出现, 不经 IPC 返回前端
+#[tauri::command]
+pub async fn vault_export_bundle(
+    master_password: String,
+    save_dir: Option<String>,
+    vault: State<'_, VaultService>,
+) -> Result<String, AppError> {
+    use crate::services::vault::bundle::encrypt_bundle_v2;
+
+    tracing::info!(target: "SECURITY::VAULT", "Exporting vault bundle (v2)...");
+    let connections = vault
+        .load_all_connections()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let ai = vault
+        .get_ai_config()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let payload = serde_json::json!({
+        "version": "2.0",
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "app": "DiTing Desk (AIDB)",
+        "connections": serde_json::to_value(&connections)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        "ai_config": serde_json::to_value(&ai).map_err(|e| AppError::Internal(e.to_string()))?
+    });
+
+    let export_json = encrypt_bundle_v2(&payload, &master_password)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let file_name = format!(
+        "diting_config_backup_{}.ditingvault",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+    save_file_directly(save_dir, file_name, export_json).await
+}
+
+/// WP6-S3: AI 配置走 vault (脱敏视图)
+#[tauri::command]
+pub async fn vault_get_ai_config(
+    vault: State<'_, VaultService>,
+) -> Result<AiConfigVaultView, AppError> {
+    vault
+        .get_ai_config_view()
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// WP3: 查询指定连接的 SSH 隧道状态 (前端角标/诊断)
+#[tauri::command]
+pub async fn get_tunnel_state(
+    conn_id: String,
+    db_service: State<'_, DbService>,
+) -> Result<crate::services::tunnel_service::TunnelState, AppError> {
+    Ok(db_service.tunnel_state(&conn_id).await)
+}
+
+/// WP3: 手动关闭指定连接的 SSH 隧道
+#[tauri::command]
+pub async fn close_tunnel(
+    conn_id: String,
+    db_service: State<'_, DbService>,
+) -> Result<(), AppError> {
+    db_service.tunnels.close(&conn_id).await;
+    Ok(())
+}
+
 /// 执行 SQL 查询并返回强类型数据集
+/// WP1: force=true 表示用户已确认 Critical 风险 (二次确认后重发), 仅豁免确认策略, 不豁免 read_only
 #[tauri::command]
 pub async fn execute_sql(
     conn_id: String,
     sql: String,
+    force: Option<bool>,
     db_service: State<'_, DbService>,
 ) -> Result<QueryResult, AppError> {
-    tracing::info!(target: "IPC::CMD", conn_id = %conn_id, "Received execute_sql IPC command");
-    db_service.execute_query(&conn_id, &sql).await
+    tracing::info!(target: "IPC::CMD", conn_id = %conn_id, force = force.unwrap_or(false), "Received execute_sql IPC command");
+    db_service
+        .execute_query(&conn_id, &sql, force.unwrap_or(false))
+        .await
 }
 
 /// 获取指定连接的表与视图 Schema 结构
@@ -54,11 +223,12 @@ pub async fn get_table_schema(
 ) -> Result<Vec<SchemaItemDto>, AppError> {
     tracing::info!(target: "IPC::CMD", conn_id = %conn_id, "Fetching table schema tree");
     let sql = "SELECT table_name, table_type, table_schema FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_name;";
-    let query_res = db_service.execute_query(&conn_id, sql).await?;
+    // 内部生成的可信只读 SQL, force=true 跳过确认策略
+    let query_res = db_service.execute_query(&conn_id, sql, true).await?;
 
     let mut items = Vec::new();
     for r in query_res.rows {
-        let name = if let Some(DbValue::Text(v)) = r.get(0) {
+        let name = if let Some(DbValue::Text(v)) = r.first() {
             v.clone()
         } else {
             continue;
@@ -94,13 +264,13 @@ pub async fn get_process_list(
 ) -> Result<Vec<ProcessItemDto>, AppError> {
     tracing::info!(target: "IPC::CMD", conn_id = %conn_id, "Fetching active process list");
     let sql = "SELECT pid, usename, datname, client_addr, query, state, FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - query_start)))::INT8 FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();";
-    let res = db_service.execute_query(&conn_id, sql).await;
+    let res = db_service.execute_query(&conn_id, sql, true).await;
 
     match res {
         Ok(query_res) => {
             let mut procs = Vec::new();
             for r in query_res.rows {
-                let pid_str = if let Some(DbValue::Text(v)) = r.get(0) {
+                let pid_str = if let Some(DbValue::Text(v)) = r.first() {
                     v.clone()
                 } else {
                     "0".into()
@@ -175,23 +345,23 @@ pub async fn get_db_users(
 
     // 1. 尝试执行 PostgreSQL 系统的 pg_roles / pg_user / pg_authid
     let pg_sql = "SELECT r.rolname::text AS usename, CASE WHEN r.rolsuper THEN 'true' ELSE 'false' END AS usesuper, CASE WHEN r.rolcreatedb THEN 'true' ELSE 'false' END AS usecreatedb, r.rolvaliduntil::text, CASE WHEN r.rolname = current_user THEN 'true' ELSE 'false' END AS is_curr, CASE WHEN r.rolcreaterole OR r.rolsuper THEN 'true' ELSE 'false' END AS is_mgr FROM pg_roles r ORDER BY is_curr DESC, r.rolname ASC;";
-    let res = db_service.execute_query(&conn_id, pg_sql).await;
+    let res = db_service.execute_query(&conn_id, pg_sql, true).await;
 
     if let Ok(query_res) = res {
         if !query_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in query_res.rows {
-                let username = match r.get(0) {
+                let username = match r.first() {
                     Some(DbValue::Text(v)) | Some(DbValue::StringDecimal(v)) => v.clone(),
                     _ => continue,
                 };
                 let is_super = match r.get(1) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let can_createdb = match r.get(2) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
@@ -200,12 +370,12 @@ pub async fn get_db_users(
                     _ => None,
                 };
                 let is_curr = match r.get(4) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let is_mgr = match r.get(5) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
@@ -230,32 +400,32 @@ pub async fn get_db_users(
 
     // 2. 尝试执行 MySQL 系统的 mysql.user
     let mysql_sql = "SELECT User, Super_priv = 'Y', Create_priv = 'Y', NULL, (User = SUBSTRING_INDEX(CURRENT_USER(), '@', 1)) AS is_curr, (Grant_priv = 'Y' OR Super_priv = 'Y') AS is_mgr FROM mysql.user GROUP BY User ORDER BY is_curr DESC, User ASC;";
-    if let Ok(mysql_res) = db_service.execute_query(&conn_id, mysql_sql).await {
+    if let Ok(mysql_res) = db_service.execute_query(&conn_id, mysql_sql, true).await {
         if !mysql_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in mysql_res.rows {
-                let username = if let Some(DbValue::Text(v)) = r.get(0) {
+                let username = if let Some(DbValue::Text(v)) = r.first() {
                     v.clone()
                 } else {
                     "root".into()
                 };
                 let is_super = match r.get(1) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "1" || v == "true",
                     _ => false,
                 };
                 let can_createdb = match r.get(2) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "t" || v == "1" || v == "true",
                     _ => false,
                 };
                 let is_curr = match r.get(4) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "1" || v == "t" || v == "true",
                     _ => false,
                 };
                 let is_mgr = match r.get(5) {
-                    Some(DbValue::Bool(b)) => b.clone(),
+                    Some(DbValue::Bool(b)) => *b,
                     Some(DbValue::Text(v)) => v == "1" || v == "t" || v == "true",
                     _ => false,
                 };
@@ -278,26 +448,26 @@ pub async fn get_db_users(
 
     // 3. 普通受限账户或特定权限视角：查询 pg_user 视图
     let pg_user_sql = "SELECT usename::text, usesuper, usecreatedb, valuntil::text, (usename = current_user()) AS is_curr FROM pg_user ORDER BY is_curr DESC, usename ASC;";
-    if let Ok(pu_res) = db_service.execute_query(&conn_id, pg_user_sql).await {
+    if let Ok(pu_res) = db_service.execute_query(&conn_id, pg_user_sql, true).await {
         if !pu_res.rows.is_empty() {
             let mut users = Vec::new();
             for r in pu_res.rows {
-                let username = match r.get(0) {
+                let username = match r.first() {
                     Some(DbValue::Text(v)) | Some(DbValue::StringDecimal(v)) => v.clone(),
                     _ => continue,
                 };
                 let is_super = match r.get(1) {
-                    Some(DbValue::Bool(v)) => v.clone(),
+                    Some(DbValue::Bool(v)) => *v,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let can_createdb = match r.get(2) {
-                    Some(DbValue::Bool(v)) => v.clone(),
+                    Some(DbValue::Bool(v)) => *v,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
                 let is_curr = match r.get(4) {
-                    Some(DbValue::Bool(v)) => v.clone(),
+                    Some(DbValue::Bool(v)) => *v,
                     Some(DbValue::Text(v)) => v == "t" || v == "true",
                     _ => false,
                 };
@@ -321,15 +491,15 @@ pub async fn get_db_users(
     }
     // 4. 普通受限账户（未开全局读系统表，但被 GRANT 特权）
     let curr_sql = "SELECT current_user, pg_has_role(current_user, 'pg_read_all_stats', 'member') AS is_granted;";
-    if let Ok(curr_res) = db_service.execute_query(&conn_id, curr_sql).await {
-        if let Some(r) = curr_res.rows.get(0) {
-            let username = if let Some(DbValue::Text(v)) = r.get(0) {
+    if let Ok(curr_res) = db_service.execute_query(&conn_id, curr_sql, true).await {
+        if let Some(r) = curr_res.rows.first() {
+            let username = if let Some(DbValue::Text(v)) = r.first() {
                 v.clone()
             } else {
                 "current_user".into()
             };
             let is_granted = match r.get(1) {
-                Some(DbValue::Bool(v)) => v.clone(),
+                Some(DbValue::Bool(v)) => *v,
                 Some(DbValue::Text(v)) => v == "t" || v == "true",
                 _ => false,
             };
@@ -359,23 +529,61 @@ pub async fn kill_process(
     db_service: State<'_, DbService>,
 ) -> Result<(), AppError> {
     tracing::info!(target: "IPC::CMD", conn_id = %conn_id, pid = %pid, "Killing active process session");
+    // WP4 步骤6: pid 范围断言 — 拒绝负数/越界 (拼接保持 i64 类型安全, 但防御异常输入)
+    if pid <= 0 || pid > i32::MAX as i64 {
+        return Err(AppError::Internal(format!(
+            "非法 pid {pid}: 超出 PostgreSQL backend pid 有效范围 (1..={})",
+            i32::MAX
+        )));
+    }
     let sql = format!("SELECT pg_terminate_backend({});", pid);
-    let _ = db_service.execute_query(&conn_id, &sql).await;
+    let _ = db_service.execute_query(&conn_id, &sql, true).await;
     Ok(())
 }
 
-/// AI 自然语言生成 SQL / 问答交互
+/// AI 自然语言生成 SQL / 问答交互 (WP2: 支持多轮 history; 保留为流式失败时的 fallback)
 #[tauri::command]
 pub async fn ai_chat(
     prompt: String,
     schema_context: Option<String>,
+    history: Option<Vec<ChatMessage>>,
     ai_service: State<'_, AiService>,
 ) -> Result<String, AppError> {
     tracing::info!(target: "IPC::CMD", "Received ai_chat IPC command");
-    ai_service.prompt(&prompt, schema_context.as_deref()).await
+    ai_service
+        .prompt(
+            history.as_deref().unwrap_or(&[]),
+            &prompt,
+            schema_context.as_deref(),
+        )
+        .await
+}
+
+/// WP2: AI 流式对话 — SSE delta 经 Tauri Channel 推送前端 (Delta/Done/Error 三态)
+#[tauri::command]
+pub async fn ai_chat_stream(
+    prompt: String,
+    schema_context: Option<String>,
+    history: Option<Vec<ChatMessage>>,
+    channel: tauri::ipc::Channel<StreamEvent>,
+    ai_service: State<'_, AiService>,
+) -> Result<(), AppError> {
+    tracing::info!(target: "IPC::CMD", "Received ai_chat_stream IPC command");
+    ai_service
+        .prompt_stream(
+            history.as_deref().unwrap_or(&[]),
+            &prompt,
+            schema_context.as_deref(),
+            move |event| {
+                // Channel send 失败 (前端已卸载) 时静默丢弃
+                let _ = channel.send(event);
+            },
+        )
+        .await
 }
 
 /// 更新自定义 AI Provider (BaseURL / Key) 配置
+/// WP2: api_key 传占位符 "__KEEP__" 或留空 (且原有 key) 时保留原 key; 落盘为加密格式
 #[tauri::command]
 pub async fn update_ai_config(
     config: AiConfig,
@@ -385,10 +593,10 @@ pub async fn update_ai_config(
     ai_service.update_config(config).await
 }
 
-/// 获取当前 AI Provider 配置
+/// 获取当前 AI Provider 配置 (WP2: 脱敏视图 — has_key + 尾4位, 绝不返回完整 key)
 #[tauri::command]
-pub async fn get_ai_config(ai_service: State<'_, AiService>) -> Result<AiConfig, AppError> {
-    Ok(ai_service.get_config().await)
+pub async fn get_ai_config(ai_service: State<'_, AiService>) -> Result<AiConfigView, AppError> {
+    Ok(ai_service.get_config_view().await)
 }
 
 /// 自动打开并跳转到用户指定的文件夹 (或系统 Downloads 目录) (macOS Finder / Windows Explorer)
@@ -515,116 +723,142 @@ pub async fn save_file_directly(
     Ok(full_path.to_string_lossy().to_string())
 }
 
-/// 导出加密的配置数据包 (包含所有已配置的数据库连接信息和 AI Provider 配置)
-/// 使用内置证书 / 固定密钥 (yuguosheng) + Argon2id 派生密钥 + AES-256-GCM 工业级加解密
+/// WP6-S4: 导出 v2 加密备份 bundle (用户主密码; 委托 vault::bundle 纯函数)
 #[tauri::command]
 pub async fn export_encrypted_bundle(
     connections_json: String,
     ai_config_json: String,
+    master_password: String,
     save_dir: Option<String>,
 ) -> Result<String, AppError> {
-    use aes_gcm::aead::{Aead, KeyInit};
-    use aes_gcm::{Aes256Gcm, Nonce};
-    use rand::RngCore;
+    use crate::services::vault::bundle::{encrypt_bundle_v2, BundleError};
 
-    tracing::info!(target: "SECURITY::VAULT", "Exporting encrypted configuration bundle...");
+    tracing::info!(target: "SECURITY::VAULT", "Exporting encrypted configuration bundle (v2)...");
 
-    // 1. 组装待加密的完整 Payload
     let payload = serde_json::json!({
-        "version": "1.0",
+        "version": "2.0",
         "created_at": chrono::Utc::now().to_rfc3339(),
         "app": "DiTing Desk (AIDB)",
         "connections": serde_json::from_str::<serde_json::Value>(&connections_json).unwrap_or(serde_json::Value::Array(vec![])),
         "ai_config": serde_json::from_str::<serde_json::Value>(&ai_config_json).unwrap_or(serde_json::Value::Null)
     });
 
-    let plaintext = serde_json::to_vec(&payload)
-        .map_err(|e| AppError::Internal(format!("Failed to serialize bundle: {}", e)))?;
+    let export_json = encrypt_bundle_v2(&payload, &master_password).map_err(|e| match e {
+        BundleError::WeakPassword => AppError::Internal(e.to_string()),
+        other => AppError::Internal(other.to_string()),
+    })?;
 
-    // 2. 生成随机 Salt 与 Nonce
-    let mut salt = [0u8; 16];
-    let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-
-    // 3. 使用 Argon2id 从密码 (yuguosheng) 派生 256 位强密钥
-    let password = b"yuguosheng";
-    let mut derived_key = [0u8; 32];
-    let params = argon2::Params::new(19456, 2, 1, Some(32)).unwrap();
-    let argon2_instance = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    argon2_instance
-        .hash_password_into(password, &salt, &mut derived_key)
-        .map_err(|e| AppError::Internal(format!("Argon2 key derivation failed: {}", e)))?;
-
-    // 4. AES-256-GCM 加密
-    let cipher = Aes256Gcm::new_from_slice(&derived_key)
-        .map_err(|e| AppError::Internal(format!("Failed to initialize AES-GCM: {}", e)))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_ref())
-        .map_err(|e| AppError::Internal(format!("AES-GCM encryption failed: {}", e)))?;
-
-    // 5. 组装密文结构并 Base64 编码保存
-    let export_bundle = serde_json::json!({
-        "format": "DITING_ENCRYPTED_VAULT",
-        "crypto": "AES-256-GCM + Argon2id",
-        "salt": urlencoding::encode_binary(&salt).into_owned(),
-        "nonce": urlencoding::encode_binary(&nonce_bytes).into_owned(),
-        "ciphertext": urlencoding::encode_binary(&ciphertext).into_owned()
-    });
-
-    let export_json = serde_json::to_string_pretty(&export_bundle)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    let file_name = format!("diting_config_backup_{}.ditingvault", chrono::Local::now().format("%Y%m%d_%H%M%S"));
-    let saved_path = save_file_directly(save_dir, file_name, export_json).await?;
-    Ok(saved_path)
+    let file_name = format!(
+        "diting_config_backup_{}.ditingvault",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+    save_file_directly(save_dir, file_name, export_json).await
 }
 
-/// 导入加密配置数据包并自动解密 (使用证书固定密钥 yuguosheng 解码并校验签名)
+/// 导入失败限速 (WP6 T14: 5 次失败/30s 窗口 → 拒绝, 防暴力破解)
+mod import_rate_limit {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    pub static FAIL_COUNT: AtomicU32 = AtomicU32::new(0);
+    pub static WINDOW_START: AtomicU64 = AtomicU64::new(0);
+    pub const LIMIT: u32 = 5;
+    pub const WINDOW_SECS: u64 = 30;
+
+    pub fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+    pub fn bump() {
+        FAIL_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    pub fn check() -> Option<u64> {
+        // 返回 Some(剩余秒) 表示被限速
+        let now = now_secs();
+        let start = WINDOW_START.load(Ordering::SeqCst);
+        if now.saturating_sub(start) > WINDOW_SECS {
+            FAIL_COUNT.store(0, Ordering::SeqCst);
+            WINDOW_START.store(now, Ordering::SeqCst);
+            return None;
+        }
+        if FAIL_COUNT.load(Ordering::SeqCst) >= LIMIT {
+            return Some(WINDOW_SECS.saturating_sub(now.saturating_sub(start)));
+        }
+        None
+    }
+    #[cfg(test)]
+    pub fn reset() {
+        FAIL_COUNT.store(0, Ordering::SeqCst);
+        WINDOW_START.store(0, Ordering::SeqCst);
+    }
+}
+
+/// WP6-S4: 导入备份 bundle — v2 主密码 / legacy v1 旧密钥分支 (委托 vault::bundle)
+/// 返回解密 JSON; legacy 时 payload 内含 "legacy_import": true 供前端引导升级
 #[tauri::command]
 pub async fn import_encrypted_bundle(
     file_content: String,
+    master_password: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
-    use aes_gcm::aead::{Aead, KeyInit};
-    use aes_gcm::{Aes256Gcm, Nonce};
+    use crate::services::vault::bundle::{decrypt_bundle, BundleError};
 
-    tracing::info!(target: "SECURITY::VAULT", "Importing and decrypting configuration bundle...");
+    tracing::info!(target: "SECURITY::VAULT", "Importing configuration bundle...");
 
-    let vault: serde_json::Value = serde_json::from_str(&file_content)
-        .map_err(|_| AppError::Internal("无效的备份文件格式，请确保上传的是 .ditingvault 加密文件。".into()))?;
-
-    if vault.get("format").and_then(|v| v.as_str()) != Some("DITING_ENCRYPTED_VAULT") {
-        return Err(AppError::Internal("非法的谛听加密备份凭证，无法识别的安全签名。".into()));
+    if let Some(wait) = import_rate_limit::check() {
+        return Err(AppError::Internal(format!(
+            "密码错误次数过多, 请 {wait} 秒后再试 (防暴力破解限速)"
+        )));
     }
 
-    let salt_str = vault.get("salt").and_then(|v| v.as_str()).ok_or_else(|| AppError::Internal("Missing salt".into()))?;
-    let nonce_str = vault.get("nonce").and_then(|v| v.as_str()).ok_or_else(|| AppError::Internal("Missing nonce".into()))?;
-    let ciphertext_str = vault.get("ciphertext").and_then(|v| v.as_str()).ok_or_else(|| AppError::Internal("Missing ciphertext".into()))?;
+    let result = decrypt_bundle(&file_content, master_password.as_deref());
+    match result {
+        Ok((json, is_legacy)) => {
+            if is_legacy {
+                tracing::warn!(target: "SECURITY::VAULT", "Legacy v1 bundle imported — 建议立即用主密码重新导出为 v2");
+            }
+            Ok(json)
+        }
+        Err(e) => {
+            // 仅密码/篡改类失败计入限速 (格式错误不消耗配额)
+            if matches!(e, BundleError::DecryptFailed) {
+                import_rate_limit::bump();
+            }
+            Err(AppError::Internal(e.to_string()))
+        }
+    }
+}
 
-    let salt = urlencoding::decode_binary(salt_str.as_bytes());
-    let nonce_bytes = urlencoding::decode_binary(nonce_str.as_bytes());
-    let ciphertext = urlencoding::decode_binary(ciphertext_str.as_bytes());
+// ============ WP6 T14: 限速单测 ============
+#[cfg(test)]
+mod tests_import_rate_limit {
+    use super::import_rate_limit;
+    // WP8: 两测试共享 FAIL_COUNT 全局态, 并行跑互相干扰 (flaky) — 串行锁保护
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // 使用 Argon2id 从固定密码 yuguosheng 派生密钥
-    let password = b"yuguosheng";
-    let mut derived_key = [0u8; 32];
-    let params = argon2::Params::new(19456, 2, 1, Some(32)).unwrap();
-    let argon2_instance = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    argon2_instance
-        .hash_password_into(password, &salt, &mut derived_key)
-        .map_err(|e| AppError::Internal(format!("Argon2 key derivation failed: {}", e)))?;
+    #[test]
+    fn t14_rate_limit_after_5_fails() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        import_rate_limit::reset();
+        assert!(import_rate_limit::check().is_none(), "初始不限速");
+        for _ in 0..5 {
+            import_rate_limit::bump();
+        }
+        let r = import_rate_limit::check();
+        assert!(r.is_some(), "5 次失败后必须限速");
+        assert!(r.unwrap() > 0 && r.unwrap() <= 30, "剩余等待秒数在窗口内");
+        import_rate_limit::reset();
+        assert!(import_rate_limit::check().is_none(), "reset 后恢复");
+    }
 
-    // AES-256-GCM 解密
-    let cipher = Aes256Gcm::new_from_slice(&derived_key)
-        .map_err(|e| AppError::Internal(format!("AES initialization failed: {}", e)))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let decrypted_bytes = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|_| AppError::Internal("解密校验失败！证书密码不匹配或备份数据已被非法篡改。".into()))?;
-
-    let decrypted_json: serde_json::Value = serde_json::from_slice(&decrypted_bytes)
-        .map_err(|e| AppError::Internal(format!("Failed to parse decrypted data: {}", e)))?;
-
-    Ok(decrypted_json)
+    #[test]
+    fn t14_under_limit_not_blocked() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        import_rate_limit::reset();
+        for _ in 0..4 {
+            import_rate_limit::bump();
+        }
+        assert!(import_rate_limit::check().is_none(), "4 次失败仍未达阈值");
+        import_rate_limit::reset();
+    }
 }
