@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Shield, UserPlus, CheckCircle2, KeyRound, Users, RefreshCw, Trash2, User } from 'lucide-react';
+import { Shield, UserPlus, CheckCircle2, KeyRound, Users, RefreshCw, Trash2, User, Search } from 'lucide-react';
 import { executeSql, executeSqlWithGuard, errToStr } from '../services/ipc';
 import { tryEscapeSqlLiteral, sanitizeIdentifier } from '../utils/sqlEscape';
 import { useAppConfirm, InlineBanner, BannerState } from './AppConfirmDialog';
@@ -99,6 +99,50 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   // WP8-S4: alert/confirm 在 Tauri WKWebView 是 no-op → 应用内横幅 + Promise 化对话框
   const [banner, setBanner] = useState<BannerState | null>(null);
   const { confirm: appConfirm, dialogElement: confirmDialog } = useAppConfirm();
+
+  // WP9-P0: 左侧用户面板可拖拽调宽 + 搜索过滤 (用户点名痛点: 固定 w-64 不可拉宽, 长角色名显示不全)
+  const [userPanelWidth, setUserPanelWidth] = useState(256);
+  const [userSearch, setUserSearch] = useState('');
+  const resizingRef = React.useRef(false);
+  const panelRef = React.useRef<HTMLDivElement | null>(null);
+
+  // 拖拽分隔条: mousedown 启动, document mousemove 调宽, mouseup 结束
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!resizingRef.current || !panelRef.current) return;
+      const rect = panelRef.current.getBoundingClientRect();
+      const next = e.clientX - rect.left;
+      // 约束: 最小 160px (够显示头像+图标), 最大 480px (不挤占右侧权限矩阵)
+      setUserPanelWidth(Math.max(160, Math.min(480, Math.round(next))));
+    };
+    const onUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  // 搜索过滤后的用户列表 (大小写不敏感子串匹配)
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter((u) => u.username.toLowerCase().includes(q));
+  }, [users, userSearch]);
 
   const handleSelectUser = (u: DbUser) => {
     selectedUserRef.current = u.username;
@@ -645,7 +689,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6">
       {/* WP8-S8: 移除 backdrop-blur — macOS 27 beta WKWebView 全屏 backdrop-filter 有合成黑屏风险; 纯色遮罩视觉等效 */}
       <ErrorBoundary variant="modal" name="用户权限管理" onClose={onClose}>
-      <div className="bg-[#101216] border border-slate-800 rounded-3xl w-full max-w-5xl h-[85vh] flex flex-col shadow-2xl overflow-hidden font-sans">
+      {/* WP9-P0: max-w-5xl→6xl, 给左侧可拖宽面板(最大480px)留出空间, 不挤占右侧权限矩阵 */}
+      <div className="bg-[#101216] border border-slate-800 rounded-3xl w-full max-w-6xl h-[88vh] flex flex-col shadow-2xl overflow-hidden font-sans">
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-[#14171d]">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
@@ -670,37 +715,98 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
         <InlineBanner banner={banner} onDismiss={() => setBanner(null)} />
 
         <div className="flex-1 flex overflow-hidden">
-          <div className="w-64 border-r border-slate-800 bg-[#12141a] overflow-y-auto p-2">
-            {users.map((u) => (
-              <div
-                key={u.username}
-                onClick={() => handleSelectUser(u)}
-                className={`p-2.5 rounded-xl cursor-pointer flex items-center justify-between transition-colors ${selectedUser?.username === u.username ? 'bg-blue-600/15 border border-blue-500/40' : 'hover:bg-slate-800/40 border border-transparent'}`}
-              >
-                <div className="flex items-center gap-2 overflow-hidden">
-                  <div className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${u.isSuperuser ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-400'}`}>
-                    {u.isSuperuser ? <Shield className="w-3.5 h-3.5" /> : <User className="w-3.5 h-3.5" />}
-                  </div>
-                  <div className="truncate">
-                    <div className="font-mono text-xs font-bold text-slate-200 truncate">{u.username}</div>
-                    <div className="text-[10px] text-slate-500">{u.isSuperuser ? 'SUPERUSER' : '普通用户'}</div>
-                  </div>
-                </div>
-                {u.username !== 'postgres' && (
+          {/* WP9-P0: 左侧用户面板 — 可拖拽调宽 + 搜索过滤 + 长角色名可见 + 空状态 */}
+          <div
+            ref={panelRef}
+            className="border-r border-slate-800 bg-[#12141a] flex flex-col shrink-0"
+            style={{ width: `${userPanelWidth}px` }}
+            data-testid="user-panel"
+          >
+            {/* 搜索框 */}
+            <div className="p-2 border-b border-slate-800/80 shrink-0">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={userSearch}
+                  onChange={(e) => setUserSearch(e.target.value)}
+                  placeholder="搜索角色名…"
+                  aria-label="搜索用户角色"
+                  className="w-full bg-slate-900/70 border border-slate-700/70 rounded-lg pl-8 pr-7 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500/70"
+                />
+                {userSearch && (
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteUser(u.username);
-                    }}
-                    className="p-1 hover:bg-red-500/20 text-slate-600 hover:text-red-400 rounded transition-colors"
-                    title="删除此角色"
+                    onClick={() => setUserSearch('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-xs"
+                    aria-label="清除搜索"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    ✕
                   </button>
                 )}
               </div>
-            ))}
+              <div className="mt-1.5 px-0.5 text-[10px] text-slate-500 font-mono">
+                共 {users.length} 个角色{userSearch.trim() ? ` · 匹配 ${filteredUsers.length}` : ''}
+              </div>
+            </div>
+
+            {/* 用户列表 */}
+            <div className="flex-1 overflow-y-auto p-2">
+              {filteredUsers.length === 0 ? (
+                <div className="mt-8 px-3 text-center text-[11px] text-slate-500 leading-relaxed">
+                  {users.length === 0
+                    ? '未加载到任何角色。请确认连接正常且当前账号可读取 pg_roles。'
+                    : `没有匹配 "${userSearch}" 的角色`}
+                </div>
+              ) : (
+                filteredUsers.map((u) => (
+                  <div
+                    key={u.username}
+                    onClick={() => handleSelectUser(u)}
+                    title={u.username}
+                    className={`group p-2.5 rounded-xl cursor-pointer flex items-center justify-between gap-1.5 transition-colors ${selectedUser?.username === u.username ? 'bg-blue-600/15 border border-blue-500/40' : 'hover:bg-slate-800/40 border border-transparent'}`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <div className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${u.isSuperuser ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-400'}`}>
+                        {u.isSuperuser ? <Shield className="w-3.5 h-3.5" /> : <User className="w-3.5 h-3.5" />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        {/* WP9: 拖宽后角色名完整换行显示, 不再 truncate 截断 */}
+                        <div className="font-mono text-xs font-bold text-slate-200 break-all leading-snug">{u.username}</div>
+                        <div className="text-[10px] text-slate-500">
+                          {u.isSuperuser ? 'SUPERUSER' : '普通用户'}
+                          {u.isCurrentUser ? ' · 当前' : ''}
+                          {u.canLogin === false ? ' · 不可登录' : ''}
+                        </div>
+                      </div>
+                    </div>
+                    {u.username !== 'postgres' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteUser(u.username);
+                        }}
+                        className="p-1 hover:bg-red-500/20 text-slate-600 hover:text-red-400 rounded transition-colors shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                        title="删除此角色"
+                        aria-label={`删除角色 ${u.username}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
+
+          {/* WP9-P0: 拖拽分隔条 (与主框架 Separator 视觉一致) */}
+          <div
+            onMouseDown={startResize}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖拽调整用户列表宽度"
+            data-testid="user-panel-resizer"
+            className="w-1.5 shrink-0 bg-slate-800 hover:bg-blue-500 transition-colors cursor-col-resize"
+          />
 
           {selectedUser ? (
             <div className="flex-1 flex flex-col bg-[#14171d]">

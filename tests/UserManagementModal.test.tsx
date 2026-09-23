@@ -115,8 +115,8 @@ describe('WP8: UserManagementModal 黑屏缺陷复现与修复验证', () => {
   it('T3: Bool 类型 DbValue (WP5 形状) 正确解析 — superuser 判定不靠字符串 "t"', async () => {
     render(<UserManagementModal isOpen connId="conn-1" connName="test" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText('yuguosheng')).toBeTruthy(), { timeout: 3000 });
-    // yuguosheng 是 superuser → 列表里应显示 SUPERUSER 标记
-    const superLabels = screen.getAllByText('SUPERUSER');
+    // yuguosheng 是 superuser → 列表里应显示 SUPERUSER 标记 (含 "· 当前" 后缀, 用正则)
+    const superLabels = screen.getAllByText(/SUPERUSER/);
     expect(superLabels.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -211,5 +211,78 @@ describe('WP8: UserManagementModal 黑屏缺陷复现与修复验证', () => {
       expect(container.textContent).toMatch(/permission denied/);
     }, { timeout: 3000 });
     expect(container.textContent).not.toContain('[object Object]');
+  });
+
+  // ===== WP9-P0: 左侧用户面板可拖宽 + 搜索 (用户点名痛点) =====
+  it('P0-1: 左侧用户面板可拖拽调宽 (mousedown+mousemove 改 width)', async () => {
+    const { container } = render(
+      <UserManagementModal isOpen connId="conn-1" connName="t" onClose={() => {}} />
+    );
+    await waitFor(() => expect(screen.getByText('readonly_user')).toBeTruthy(), { timeout: 3000 });
+
+    const panel = screen.getByTestId('user-panel');
+    const resizer = screen.getByTestId('user-panel-resizer');
+    // 初始宽度 256px
+    expect(panel.style.width).toBe('256px');
+
+    // jsdom 元素默认 getBoundingClientRect().left = 0, 故 clientX 即目标宽度
+    fireEvent.mouseDown(resizer, { clientX: 256 });
+    fireEvent.mouseMove(document, { clientX: 400 });
+    fireEvent.mouseUp(document);
+
+    expect(panel.style.width).toBe('400px');
+    expect(container).toBeTruthy();
+  });
+
+  it('P0-2: 拖拽宽度受约束 (最小 160 / 最大 480)', async () => {
+    render(<UserManagementModal isOpen connId="conn-1" connName="t" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('readonly_user')).toBeTruthy(), { timeout: 3000 });
+    const panel = screen.getByTestId('user-panel');
+    const resizer = screen.getByTestId('user-panel-resizer');
+
+    // 拖到极小 (clientX=10 → clamp 到 160)
+    fireEvent.mouseDown(resizer, { clientX: 256 });
+    fireEvent.mouseMove(document, { clientX: 10 });
+    fireEvent.mouseUp(document);
+    expect(panel.style.width).toBe('160px');
+
+    // 拖到极大 (clientX=5000 → clamp 到 480)
+    fireEvent.mouseDown(resizer, { clientX: 160 });
+    fireEvent.mouseMove(document, { clientX: 5000 });
+    fireEvent.mouseUp(document);
+    expect(panel.style.width).toBe('480px');
+  });
+
+  it('P0-3: 搜索框过滤角色列表 (大小写不敏感)', async () => {
+    render(<UserManagementModal isOpen connId="conn-1" connName="t" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('readonly_user')).toBeTruthy(), { timeout: 3000 });
+
+    const search = screen.getByLabelText('搜索用户角色') as HTMLInputElement;
+    // 3 个真实角色: yuguosheng / app_writer / readonly_user
+    expect(screen.getByText('yuguosheng')).toBeTruthy();
+
+    fireEvent.change(search, { target: { value: 'READONLY' } });
+    await waitFor(() => expect(screen.queryByText('yuguosheng')).toBeNull());
+    expect(screen.getByText('readonly_user')).toBeTruthy();
+    // 计数提示
+    expect(screen.getByText(/匹配 1/)).toBeTruthy();
+  });
+
+  it('P0-4: 搜索无结果 → 空状态提示 (不静默空白)', async () => {
+    render(<UserManagementModal isOpen connId="conn-1" connName="t" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('readonly_user')).toBeTruthy(), { timeout: 3000 });
+    const search = screen.getByLabelText('搜索用户角色');
+    fireEvent.change(search, { target: { value: 'zzz_no_such_role' } });
+    await waitFor(() => expect(screen.getByText(/没有匹配/)).toBeTruthy());
+  });
+
+  it('P0-5: 清除搜索按钮恢复完整列表', async () => {
+    render(<UserManagementModal isOpen connId="conn-1" connName="t" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('readonly_user')).toBeTruthy(), { timeout: 3000 });
+    const search = screen.getByLabelText('搜索用户角色');
+    fireEvent.change(search, { target: { value: 'app_writer' } });
+    await waitFor(() => expect(screen.queryByText('yuguosheng')).toBeNull());
+    fireEvent.click(screen.getByLabelText('清除搜索'));
+    await waitFor(() => expect(screen.getByText('yuguosheng')).toBeTruthy());
   });
 });
