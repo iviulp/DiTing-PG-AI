@@ -26,8 +26,14 @@
 | TS 类型 | `npx tsc --noEmit` | **0 error** |
 | 前端单测 | `npm run test` (vitest) | **44 passed (4 files)** |
 | 前端构建 | `npm run build` (vite) | **成功** |
-| Release 构建 | `cargo build --release --bin aidb-desk` | 见下方补录 |
-| 完整桌面打包 | `npx tauri build` | 见下方补录 |
+| Release 构建 | `cargo build --release --bin aidb-desk` | **成功**（29.9MB arm64；需 `[profile.release.build-override]` 绕过 Xcode 27 beta ld-27037 的 proc-macro dylib LINKEDIT bug，见 Cargo.toml 注释） |
+| 完整桌面打包 | `npx tauri build` | **成功**：`DiTing PG AI.app`（ad-hoc 签名，codesign 验证通过）+ `DiTing PG AI_2.0.0_aarch64.dmg`（18MB，hdiutil verify checksum VALID） |
+
+打包产物路径：
+- `src-tauri/target/release/bundle/macos/DiTing PG AI.app`
+- `src-tauri/target/release/bundle/dmg/DiTing PG AI_2.0.0_aarch64.dmg`
+
+注：正式分发前需替换 ad-hoc 签名为 Apple Developer ID 签名 + 公证（notarization），属发布运营事项，不阻塞本次验收。
 
 ## 三、发布说明（用户可见变更）
 
