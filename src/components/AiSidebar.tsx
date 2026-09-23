@@ -274,6 +274,12 @@ PostgreSQL Data Type & Case Sensitivity Rules:
       } finally {
         if (flushTimer) clearTimeout(flushTimer);
       }
+      // WP9 防御: askAi 理论上返回 string, 但流式契约异常时可能非字符串。
+      // 兜底用已流式渲染的 buffer (真实内容), 绝不让 undefined 流到下方 .match() 崩溃。
+      if (typeof reply !== 'string') {
+        console.warn('[AiSidebar] askAi 返回非字符串, 回退到流式累积内容', reply);
+        reply = streamBuffer;
+      }
       // Done 后以 full_text 整体替换校验 (流式拼接可能与后端累积有细微差)
       setChatLog((prev) =>
         prev.map((m) => ((m as any).id === streamMsgId ? { ...m, text: reply } : m))

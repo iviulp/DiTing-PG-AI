@@ -134,11 +134,21 @@ export async function aiChatStream(
 ): Promise<string> {
   const channel = new Channel<AiStreamEvent>();
   return await new Promise<string>((resolve, reject) => {
+    // WP9 防御: 前端自累积 delta 真实内容。后端 Done.fullText 契约异常时用它兜底,
+    // 避免 resolve(undefined) 导致调用方 reply.match() 崩溃 (AI 输出到半截报错)。
+    let accumulated = '';
     channel.onmessage = (msg) => {
       if (msg.type === 'delta') {
+        if (typeof msg.text === 'string') accumulated += msg.text;
         onDelta(msg.text);
       } else if (msg.type === 'done') {
-        resolve(msg.fullText);
+        if (typeof msg.fullText === 'string') {
+          resolve(msg.fullText);
+        } else {
+          // 契约防御: 不是假数据, 是已收到的真实流式内容
+          console.warn('[aiChatStream] Done 事件缺 fullText 字段 (serde 契约异常), 回退到流式累积内容');
+          resolve(accumulated);
+        }
       } else if (msg.type === 'error') {
         reject(new Error(msg.message));
       }

@@ -20,8 +20,12 @@ pub struct ChatMessage {
 }
 
 /// 流式事件 (serde tag="type" camelCase, 前端 Channel 判别)
+/// WP9 修复: rename_all 在 enum 容器级只重命名【变体名】(Done→done), 不影响结构体变体字段;
+/// 必须加 rename_all_fields="camelCase" (serde ≥1.0.190) 才能把 Done{full_text} 序列化为
+/// {"type":"done","fullText":...}, 与前端 AiStreamEvent.fullText 契约对齐。
+/// 此前缺该属性 → 前端 msg.fullText=undefined → reply.match() 崩溃 (AI 输出到半截报错)。
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum StreamEvent {
     Delta { text: String },
     Done { full_text: String },
@@ -525,6 +529,38 @@ impl AiService {
 mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    /// WP9: StreamEvent serde 契约测试 — 验证序列化后的 JSON 字段名与前端 TS 判别对齐。
+    /// 根因: `#[serde(tag="type", rename_all="camelCase")]` 中 rename_all 在 enum 容器级
+    /// 只重命名【变体名】(Done→done), 不重命名【结构体变体的字段】(full_text 仍是 snake_case)。
+    /// 前端 AiStreamEvent 期望 { type:'done', fullText } → 取到 undefined → reply.match() 崩溃。
+    /// 修复: 加 rename_all_fields="camelCase" (serde ≥1.0.190)。本测试守护该契约。
+    #[test]
+    fn stream_event_serde_field_names_match_frontend_contract() {
+        // Delta: { type:'delta', text } — 字段名 text 两端一致
+        let delta = serde_json::to_value(StreamEvent::Delta { text: "hi".into() }).unwrap();
+        assert_eq!(delta["type"], "delta");
+        assert_eq!(delta["text"], "hi", "Delta.text 必须是 text");
+
+        // Done: 前端读 msg.fullText — 序列化字段名必须是 fullText (不是 full_text)
+        let done = serde_json::to_value(StreamEvent::Done { full_text: "完整回复".into() }).unwrap();
+        assert_eq!(done["type"], "done");
+        assert!(
+            done.get("fullText").is_some(),
+            "Done 必须序列化为 camelCase 'fullText' (前端契约); 实际: {}",
+            done
+        );
+        assert_eq!(done["fullText"], "完整回复");
+        assert!(
+            done.get("full_text").is_none(),
+            "不得残留 snake_case 'full_text' 字段 (前端读不到)"
+        );
+
+        // Error: { type:'error', message } — 两端一致
+        let err = serde_json::to_value(StreamEvent::Error { message: "boom".into() }).unwrap();
+        assert_eq!(err["type"], "error");
+        assert_eq!(err["message"], "boom");
+    }
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
