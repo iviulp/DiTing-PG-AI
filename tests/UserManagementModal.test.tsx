@@ -171,6 +171,35 @@ describe('WP8: UserManagementModal 黑屏缺陷复现与修复验证', () => {
     expect(probeCalls.length).toBe(0);
   });
 
+  it('T9: isOpen false→true 重渲染不触发 React #310 (hooks 顺序回归 — 原始黑屏真因)', async () => {
+    // 复现真实用户流: 组件随 App 常驻挂载 (isOpen=false), 用户右键打开时切 true。
+    // 修复前 `if (!isOpen) return null` 在部分 useState/useMemo 之前 → hooks 数量不一致 → React #310。
+    const { rerender, container } = render(
+      <UserManagementModal isOpen={false} connId="conn-1" connName="t" onClose={() => {}} />
+    );
+    // 关闭态: 不渲染弹窗内容
+    expect(container.querySelector('[data-testid="inline-banner"]')).toBeNull();
+    expect(container.textContent || '').not.toContain('User & Privilege Manager');
+
+    // 打开态: 必须正常渲染, 不得抛 #310 (若抛, ErrorBoundary 之外会直接冒泡使本用例失败)
+    rerender(<UserManagementModal isOpen connId="conn-1" connName="t" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('readonly_user')).toBeTruthy(), { timeout: 3000 });
+    expect(container.textContent).toContain('User & Privilege Manager');
+    // 反向: true→false 再关闭也不崩
+    rerender(<UserManagementModal isOpen={false} connId="conn-1" connName="t" onClose={() => {}} />);
+    expect(container.textContent || '').not.toContain('User & Privilege Manager');
+  });
+
+  it('T10: React 渲染期无 hooks 顺序错误 (console.error 不含 #310/fewer hooks)', async () => {
+    const { rerender } = render(
+      <UserManagementModal isOpen={false} connId="conn-1" connName="t" onClose={() => {}} />
+    );
+    rerender(<UserManagementModal isOpen connId="conn-1" connName="t" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('readonly_user')).toBeTruthy(), { timeout: 3000 });
+    const hooksErr = consoleErrors.filter((e) => /#310|fewer hooks|more hooks|rendered (fewer|more)|hooks can only/i.test(e));
+    expect(hooksErr).toEqual([]);
+  });
+
   it('T7: AppErrorDto 对象错误能提取可读消息 (不显示 [object Object])', async () => {
     invokeMock.mockImplementation((_cmd: string) =>
       Promise.reject({ code: 'DB_ERROR', message: 'permission denied for schema app' })

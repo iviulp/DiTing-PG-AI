@@ -307,7 +307,11 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     if (isOpen && connId) reloadUsers();
   }, [isOpen, connId]);
 
-  if (!isOpen) return null;
+  // WP8-H1 实锤修复: 原先此处有 `if (!isOpen) return null;` 早返回,
+  // 但其后仍有 useState(resetPwdUser/resetPassword/isApplying) 与 useMemo(sqlStatementsMemo)。
+  // 组件常驻挂载, isOpen false→true 时 hooks 数量不一致 → React #310 抛异常;
+  // 修复前无 ErrorBoundary 时整树卸载 = 用户看到的"黑屏"。
+  // Hooks 规则: 所有 hooks 必须无条件执行, 早返回只能放在全部 hooks 之后。
 
   const handleAddUser = async () => {
     if (!newUsername) return;
@@ -632,6 +636,10 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
       return { ...prev, [schema]: updated };
     });
   };
+
+
+  // WP8: 全部 hooks 已无条件执行完毕, 此处早返回安全
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6">
