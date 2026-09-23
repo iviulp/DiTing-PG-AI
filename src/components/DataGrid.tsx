@@ -6,6 +6,7 @@ import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
 import { errToStr } from '../services/ipc';
 import { explainPgError } from '../utils/pgErrorHints';
 import { PaginationBar } from './PaginationBar';
+import { FilterBuilder, ColumnMetaLite } from './FilterBuilder';
 import { useAppStore } from '../store/useAppStore';
 import { showAlert } from '../services/appDialog';
 
@@ -15,8 +16,13 @@ const MAX_RENDER_ROWS = 2000;
 interface DataGridProps {
   /** WP9-P1-7: 查询失败错误 (与 result=null 区分"未执行/0行/失败"三态) */
   error?: string | null;
-  /** WP10: 打开过滤构建器 (FilterBuilder 挂在 App 层, 此处只是入口按钮) */
-  onOpenFilter?: () => void;
+  /** WP10: 浏览表模式列元数据 (内联 FilterBuilder 列名自动带出) */
+  filterColumns?: ColumnMetaLite[];
+  /** WP10: 内联过滤面板受控开关 (App 层持有 — 工具条按钮与右键"分页浏览"入口共用) */
+  filterPanelOpen?: boolean;
+  onFilterPanelOpenChange?: (open: boolean) => void;
+  /** WP10: 内联过滤面板"应用"回调 → store.pagingSetFilters */
+  onApplyFilters?: (filters: import('../utils/browseSqlBuilder').BrowseFilter[], combinator: import('../utils/browseSqlBuilder').FilterCombinator) => void;
   result: QueryResult | null;
   resultTabs?: QueryResultTabItem[];
   activeTabId?: string;
@@ -39,7 +45,10 @@ export const DataGrid: React.FC<DataGridProps> = ({
   isExecuting,
   tableName,
   onCommitChanges,
-  onOpenFilter
+  filterColumns,
+  filterPanelOpen = false,
+  onFilterPanelOpenChange,
+  onApplyFilters
 }) => {
   // 暂存修改区: { "rowIndex_colName": "newValue" } (rowIndex < originalLength 表示修改原行，>= originalLength 表示新增行)
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -460,16 +469,21 @@ export const DataGrid: React.FC<DataGridProps> = ({
             <Plus className="w-3.5 h-3.5" /> 增加行
           </button>
 
-          {/* WP10: 服务端过滤构建器入口 (浏览表模式) */}
-          {paging?.mode === 'table' && onOpenFilter && (
+          {/* WP10: 服务端过滤构建器入口 (浏览表模式) — 就地展开内联面板 */}
+          {paging?.mode === 'table' && (
             <button
-              onClick={onOpenFilter}
-              className="px-2.5 py-1 bg-[#1a1d26] hover:bg-[#222733] text-slate-300 rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors border border-[#272d3b]"
-              title="可视化过滤 (服务端 WHERE, 列名自动带出)"
+              onClick={() => onFilterPanelOpenChange?.(!filterPanelOpen)}
+              className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors border ${
+                filterPanelOpen
+                  ? 'bg-purple-600 hover:bg-purple-500 text-white border-purple-500'
+                  : 'bg-[#1a1d26] hover:bg-[#222733] text-slate-300 border-[#272d3b]'
+              }`}
+              title="可视化过滤 (在下方展开面板点选生成 WHERE, 列名自动带出)"
               data-testid="open-filter-builder"
             >
-              <Filter className="w-3.5 h-3.5 text-purple-400" />
+              <Filter className={`w-3.5 h-3.5 ${filterPanelOpen ? 'text-white' : 'text-purple-400'}`} />
               过滤{(paging.filters?.length ?? 0) > 0 ? ` (${paging.filters.length})` : ''}
+              <span className="text-[9px] opacity-70">{filterPanelOpen ? '▲ 收起' : '▼'}</span>
             </button>
           )}
 
@@ -529,6 +543,22 @@ export const DataGrid: React.FC<DataGridProps> = ({
           </span>
         )}
       </div>
+
+      {/* WP10: 内联过滤构建器折叠面板 (点"过滤"就地展开, 直接填条件) */}
+      {paging?.mode === 'table' && filterPanelOpen && (
+        <FilterBuilder
+          inline
+          isOpen
+          onClose={() => onFilterPanelOpenChange?.(false)}
+          columns={filterColumns || []}
+          initialFilters={paging.filters || []}
+          initialCombinator={paging.combinator || 'AND'}
+          onApply={(filters, combinator) => {
+            onApplyFilters?.(filters, combinator);
+            onFilterPanelOpenChange?.(false); // 应用后收起, 结果立即可见
+          }}
+        />
+      )}
 
       {/* Main Table Grid */}
       <div className="flex-1 overflow-auto bg-[#0d0f14]">
@@ -910,8 +940,10 @@ export const DataGrid: React.FC<DataGridProps> = ({
         </div>
       )}
 
-      {/* WP10: 分页条 (浏览表模式 / 手写 SQL 分页模式且只读时显示) */}
-      {paging && result.is_read_only && (
+      {/* WP10: 分页条 — paging 仅在 SELECT/浏览模式被设置, 有即显示。
+          (修复: 原条件误用 result.is_read_only — 那是连接级只读旗标,
+          普通可写连接恒为 false 导致分页条永不渲染) */}
+      {paging && (
         <PaginationBar paging={paging} currentRowCount={result.rows.length} />
       )}
 

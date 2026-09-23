@@ -3,7 +3,7 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { explainPgError } from './utils/pgErrorHints';
 import { ShortcutsHelpModal } from './components/ShortcutsHelpModal';
-import { FilterBuilder, ColumnMetaLite } from './components/FilterBuilder';
+import { ColumnMetaLite } from './components/FilterBuilder';
 import { getTableColumnsMetaData } from './services/ipc';
 import { useAppStore } from './store/useAppStore';
 import { WelcomeScreen } from './components/WelcomeScreen';
@@ -67,7 +67,6 @@ export const App: React.FC = () => {
     setAiConfig,
     pendingSafetyConfirm,
     resolveSafetyConfirm,
-    paging,
     browseTable,
     runQueryPaged,
     pagingSetFilters,
@@ -691,7 +690,7 @@ export const App: React.FC = () => {
                 const [schema, table] = tbl.includes('.')
                   ? [tbl.split('.')[0], tbl.split('.').slice(1).join('.')]
                   : ['public', tbl];
-                setSqlText(`SELECT * FROM ${tbl.includes('.') ? tbl.split('.').map((seg) => quoteIdentifier(seg)).join('.') : quoteIdentifier(tbl)} LIMIT 100;`);
+                setSqlText(`SELECT * FROM ${tbl.includes('.') ? tbl.split('.').map((seg) => quoteIdentifier(seg)).join('.') : quoteIdentifier(tbl)};`); // WP10: 不带 LIMIT — 分页条自动接管 (COUNT+LIMIT/OFFSET)
                 browseTable(schema, table);
                 // 列元数据异步带出 (FilterBuilder 列名下拉用)
                 getTableColumnsMetaData(activeConnId || '', table, schema)
@@ -783,7 +782,10 @@ export const App: React.FC = () => {
                     }}
                     isExecuting={isExecuting}
                     tableName={designerTable || 'table'}
-                    onOpenFilter={() => setIsFilterBuilderOpen(true)}
+                    filterColumns={browseColumns}
+                    filterPanelOpen={isFilterBuilderOpen}
+                    onFilterPanelOpenChange={setIsFilterBuilderOpen}
+                    onApplyFilters={(filters, combinator) => { pagingSetFilters(filters, combinator); }}
                     onCommitChanges={async ({ edits, addedRows, deletedRowIndices }) => {
                       if (!queryResult || !activeConnId) return;
 
@@ -1113,17 +1115,6 @@ export const App: React.FC = () => {
       {/* WP9-P2-9: 快捷键与功能速查表 */}
       <ShortcutsHelpModal isOpen={isShortcutsHelpOpen} onClose={() => setIsShortcutsHelpOpen(false)} />
 
-      {/* WP10: 可视化过滤构建器 (浏览表模式, 列名自动带出) */}
-      {paging?.mode === 'table' && (
-        <FilterBuilder
-          isOpen={isFilterBuilderOpen}
-          onClose={() => setIsFilterBuilderOpen(false)}
-          columns={browseColumns}
-          initialFilters={paging.filters}
-          initialCombinator={paging.combinator}
-          onApply={(filters, combinator) => { pagingSetFilters(filters, combinator); }}
-        />
-      )}
     </div>
   );
 };

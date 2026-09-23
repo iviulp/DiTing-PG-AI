@@ -17,6 +17,8 @@ export interface ColumnMetaLite {
 interface FilterBuilderProps {
   isOpen: boolean;
   onClose: () => void;
+  /** 内联折叠面板模式 (嵌在 DataGrid 工具条下方展开, 无遮罩) — 用户要求就地填过滤信息 */
+  inline?: boolean;
   /** 元数据自动带出 (getTableColumnsMetaData 结果) */
   columns: ColumnMetaLite[];
   initialFilters: BrowseFilter[];
@@ -71,7 +73,7 @@ interface DraftRow {
 let draftSeq = 1;
 
 export const FilterBuilder: React.FC<FilterBuilderProps> = ({
-  isOpen, onClose, columns, initialFilters, initialCombinator, onApply,
+  isOpen, onClose, columns, initialFilters, initialCombinator, onApply, inline = false,
 }) => {
   const [rows, setRows] = useState<DraftRow[]>([]);
   const [combinator, setCombinator] = useState<FilterCombinator>(initialCombinator);
@@ -157,6 +159,18 @@ export const FilterBuilder: React.FC<FilterBuilderProps> = ({
     onClose();
   };
 
+  // 内联模式: 就地展开的折叠面板 (用户 2026-09-23 反馈: 点过滤直接在这里填, 不要弹窗)
+  if (inline) {
+    return (
+      <div
+        className="bg-[#151821] border-b-2 border-purple-500/40 w-full max-h-[50vh] overflow-auto flex flex-col font-sans text-xs text-slate-200"
+        data-testid="filter-builder"
+      >
+        {renderInner()}
+      </div>
+    );
+  }
+
   return (
     <div className="absolute inset-0 z-40 bg-black/40 backdrop-blur-[1px] flex items-start justify-center pt-8" onClick={onClose}>
       <div
@@ -164,6 +178,15 @@ export const FilterBuilder: React.FC<FilterBuilderProps> = ({
         onClick={(e) => e.stopPropagation()}
         data-testid="filter-builder"
       >
+        {renderInner()}
+      </div>
+    </div>
+  );
+
+  // 共用主体 (头/条件行/预览/按钮) — inline 与弹窗两种容器复用
+  function renderInner() {
+    return (
+      <>
         {/* 头 */}
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-[#181b22]">
           <span className="font-bold text-sm text-white flex items-center gap-2">
@@ -378,7 +401,7 @@ export const FilterBuilder: React.FC<FilterBuilderProps> = ({
             </button>
           </div>
         </div>
-      </div>
-    </div>
-  );
+      </>
+    );
+  }
 };

@@ -440,3 +440,79 @@ describe('WP10-S6: 浏览偏好持久化 (conn+table 记忆)', () => {
     expect(prefs['ux-demo-conn|shop|orders'].pageSize).toBe(200);
   });
 });
+
+// ============ 用户 2026-09-23 反馈回归: 分页条不显示 + 过滤要就地展开 ============
+import { DataGrid } from '../src/components/DataGrid';
+
+const gridPaging: PagingState = {
+  mode: 'table', schema: 'shop', table: 'orders',
+  orderByColumns: ['id'], orderByDirection: 'ASC', allColumns: ['id'],
+  filters: [], combinator: 'AND',
+  page: 1, pageSize: 2, total: 6, totalIsEstimate: false, loading: false,
+  currentPageSql: 'SELECT * FROM "shop"."orders" ORDER BY "id" ASC LIMIT 2 OFFSET 0;',
+};
+
+describe('回归: 普通可写连接 (is_read_only=false) 也要显示分页条', () => {
+  it('DataGrid paging 存在即渲染 PaginationBar (原 bug: 误判 result.is_read_only)', () => {
+    const result = {
+      columns: [{ name: 'id', data_type: 'bigint' }, { name: 'status', data_type: 'text' }],
+      rows: [[I8(5), T('cancelled')], [I8(6), T('new')]],
+      rows_affected: 2, elapsed_ms: 3, is_read_only: false, // 普通可写连接
+    };
+    useAppStore.setState({ paging: gridPaging, queryResult: result } as any);
+    render(<DataGrid result={result} tableName="orders" />);
+    expect(screen.getByTestId('paging-total').textContent).toBe('共 6 行');
+    expect(screen.getByLabelText('下一页')).toBeTruthy();
+  });
+});
+
+describe('回归: 点"过滤"按钮 → 就地展开内联面板直接填条件 (非全屏弹窗)', () => {
+  it('面板收起时点"过滤"按钮 → onFilterPanelOpenChange(true) (就地展开)', () => {
+    const onPanelChange = vi.fn();
+    const result = {
+      columns: [{ name: 'id', data_type: 'bigint' }],
+      rows: [[I8(5)]], rows_affected: 1, elapsed_ms: 1, is_read_only: true,
+    };
+    useAppStore.setState({ paging: gridPaging, queryResult: result } as any);
+    render(
+      <DataGrid
+        result={result}
+        tableName="orders"
+        filterColumns={[{ column_name: 'status', data_type: 'text' }]}
+        filterPanelOpen={false}
+        onFilterPanelOpenChange={onPanelChange}
+      />
+    );
+    // 面板初始收起
+    expect(screen.queryByTestId('filter-builder')).toBeNull();
+    fireEvent.click(screen.getByTestId('open-filter-builder'));
+    expect(onPanelChange).toHaveBeenCalledWith(true);
+  });
+
+  it('filterPanelOpen=true → 内联面板渲染且含列下拉 (直接填过滤信息)', () => {
+    const result = {
+      columns: [{ name: 'id', data_type: 'bigint' }],
+      rows: [[I8(5)]], rows_affected: 1, elapsed_ms: 1, is_read_only: true,
+    };
+    useAppStore.setState({ paging: gridPaging, queryResult: result } as any);
+    const onApplyFilters = vi.fn();
+    const onPanelChange = vi.fn();
+    render(
+      <DataGrid
+        result={result}
+        tableName="orders"
+        filterColumns={[{ column_name: 'status', data_type: 'text' }]}
+        filterPanelOpen
+        onFilterPanelOpenChange={onPanelChange}
+        onApplyFilters={onApplyFilters}
+      />
+    );
+    expect(screen.getByTestId('filter-builder')).toBeTruthy();
+    // 内联面板里直接选列填值应用
+    fireEvent.change(screen.getByLabelText('过滤列'), { target: { value: 'status' } });
+    fireEvent.change(screen.getByLabelText('过滤值'), { target: { value: 'cancelled' } });
+    fireEvent.click(screen.getByTestId('fb-apply'));
+    expect(onApplyFilters).toHaveBeenCalledWith([{ column: 'status', operator: '=', value: 'cancelled' }], 'AND');
+    expect(onPanelChange).toHaveBeenCalledWith(false); // 应用后收起
+  });
+});
