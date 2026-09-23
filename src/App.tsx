@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
+import { explainPgError } from './utils/pgErrorHints';
 import { useAppStore } from './store/useAppStore';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { SqlEditor } from './components/SqlEditor';
@@ -604,9 +605,25 @@ export const App: React.FC = () => {
 
       {/* Error Alert Banner */}
       {errorMsg && (
-        <div className="bg-red-900/80 border-b border-red-700 text-red-200 px-4 py-1.5 text-xs flex justify-between items-center">
-          <span>⚠️ {errorMsg}</span>
-          <button onClick={() => useAppStore.setState({ errorMsg: null })}>✕</button>
+        <div className="bg-red-900/80 border-b border-red-700 text-red-200 px-4 py-1.5 text-xs flex justify-between items-center gap-3">
+          <span className="truncate font-mono" title={explainPgError(errorMsg) ? `${errorMsg}\n\n💡 ${explainPgError(errorMsg)!.explain} ${explainPgError(errorMsg)!.suggestion}` : errorMsg}>
+            ⚠️ {errorMsg}
+            {explainPgError(errorMsg) && (
+              <span className="ml-2 text-red-300/80 font-sans" data-testid="banner-error-hint">💡 {explainPgError(errorMsg)!.explain}</span>
+            )}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {/* WP9-P2-5: 闭环入口 — 打开 AI 侧栏 (侧栏内 currentError 驱动"一键修复此错误") */}
+            <button
+              onClick={() => setIsAiSidebarOpen(true)}
+              className="px-2 py-0.5 bg-red-700/60 hover:bg-red-600 rounded text-[10px] font-bold text-red-100 border border-red-500/50 transition-colors"
+              data-testid="ai-explain-error"
+              title="打开 AI 侧栏分析并修复此错误"
+            >
+              🤖 让 AI 解释此错误
+            </button>
+            <button onClick={() => useAppStore.setState({ errorMsg: null })}>✕</button>
+          </div>
         </div>
       )}
 

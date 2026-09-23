@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ProcessItem } from '../types';
 import { getProcessList, killProcess , errToStr } from '../services/ipc';
 import { Activity, Skull, RefreshCw, X } from 'lucide-react';
@@ -17,14 +17,23 @@ interface ProcessListModalProps {
 export const ProcessListModal: React.FC<ProcessListModalProps> = ({ isOpen, connId, onClose }) => {
   const [processes, setProcesses] = useState<ProcessItem[]>([]);
   const [loading, setLoading] = useState(false);
+  // WP9-P2-8: 自动刷新 (0=关 / 2000 / 5000 ms) — SRE 盯锁等待不用手动狂点
+  const [autoRefreshMs, setAutoRefreshMs] = useState<number>(0);
+  // WP9: 拉取失败显式呈现 (原 Quiet fail 违反"该弹错弹错"原则)
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const lastFetchAt = useRef<number>(0);
+  const [lastFetchLabel, setLastFetchLabel] = useState<string>('');
 
   const fetchProcesses = async () => {
     setLoading(true);
+    setFetchError(null);
     try {
       const res = await getProcessList(connId);
       setProcesses(res || []);
+      lastFetchAt.current = Date.now();
+      setLastFetchLabel(new Date().toLocaleTimeString('zh-CN', { hour12: false }));
     } catch (err) {
-      // Quiet fail
+      setFetchError(errToStr(err));
     } finally {
       setLoading(false);
     }
@@ -34,7 +43,16 @@ export const ProcessListModal: React.FC<ProcessListModalProps> = ({ isOpen, conn
     if (isOpen) {
       fetchProcesses();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, connId]);
+
+  // WP9-P2-8: 自动刷新定时器 (仅弹窗打开时运行)
+  useEffect(() => {
+    if (!isOpen || autoRefreshMs <= 0) return;
+    const timer = setInterval(() => { fetchProcesses(); }, autoRefreshMs);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, autoRefreshMs, connId]);
 
   if (!isOpen) return null;
 
@@ -59,6 +77,24 @@ export const ProcessListModal: React.FC<ProcessListModalProps> = ({ isOpen, conn
             <h2 className="text-base font-bold text-white">Database Process & Lock Inspector (进程锁监控)</h2>
           </div>
           <div className="flex items-center gap-3">
+            {/* WP9-P2-8: 自动刷新开关 */}
+            <select
+              value={autoRefreshMs}
+              onChange={(e) => setAutoRefreshMs(Number(e.target.value))}
+              className="px-2 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-300 text-[11px] focus:outline-none focus:border-emerald-500"
+              aria-label="自动刷新间隔"
+              data-testid="auto-refresh-select"
+              title="自动刷新间隔 (盯锁等待时免手动)"
+            >
+              <option value={0}>自动刷新: 关</option>
+              <option value={2000}>自动刷新: 2s</option>
+              <option value={5000}>自动刷新: 5s</option>
+            </select>
+            {lastFetchLabel && !loading && (
+              <span className="text-[10px] text-slate-500 font-mono" data-testid="last-fetch-at">
+                {lastFetchAt.current && autoRefreshMs > 0 ? '⟳ ' : ''}{lastFetchLabel}
+              </span>
+            )}
             <button
               onClick={fetchProcesses}
               disabled={loading}
@@ -72,6 +108,13 @@ export const ProcessListModal: React.FC<ProcessListModalProps> = ({ isOpen, conn
             </button>
           </div>
         </div>
+
+        {/* WP9: 拉取失败显式呈现 (真实报错, 不静默) */}
+        {fetchError && (
+          <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/40 text-red-300 text-[11px] font-mono break-all" data-testid="process-fetch-error">
+            ⚠️ 进程列表拉取失败: {fetchError}
+          </div>
+        )}
 
         {/* Process Table Grid */}
         <div className="flex-1 overflow-auto p-4">

@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { QueryResult, QueryResultTabItem } from '../types';
-import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Copy } from 'lucide-react';
+import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Copy, Filter } from 'lucide-react';
 import { RowDetailDrawer } from './RowDetailDrawer';
 import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
 import { errToStr } from '../services/ipc';
+import { explainPgError } from '../utils/pgErrorHints';
 import { showAlert } from '../services/appDialog';
 
 /** WP9-P1-6: 大结果集渲染上限 — 超过只渲染前 N 行并横幅警示 (数据仍全量在内存, 导出不受影响) */
@@ -42,6 +43,9 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // 排序状态: { colName: string, direction: 'asc' | 'desc' } | null
   const [sortState, setSortState] = useState<{ colName: string; direction: 'asc' | 'desc' } | null>(null);
 
+  // WP9-P2-1: 列头快速筛选 { colName: 子串 } — 仅过滤已加载行 (明示范围, 不改 SQL)
+  const [colFilters, setColFilters] = useState<Record<string, string>>({});
+
   // 标记待删除行索引集合
   const [pendingDeletions, setPendingDeletions] = useState<Set<number>>(new Set());
 
@@ -77,6 +81,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
     setSelectedRowIdx(null);
     setContextMenu(null);
     setSortState(null);
+    setColFilters({});
   }, [result]);
 
   // 点击页面其他区域关闭右键菜单
@@ -167,7 +172,21 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // 根据 sortState 计算排序后的行数组与原始索引映射
   const sortedOriginalRows = useMemo(() => {
     if (!result) return [];
-    const rowsWithIdx = result.rows.map((row, origIdx) => ({ row, origIdx }));
+    let rowsWithIdx = result.rows.map((row, origIdx) => ({ row, origIdx }));
+
+    // WP9-P2-1: 列筛选 (大小写不敏感子串; NULL 按空串参与匹配)
+    const activeFilters = Object.entries(colFilters).filter(([, v]) => v.trim() !== '');
+    if (activeFilters.length > 0) {
+      rowsWithIdx = rowsWithIdx.filter(({ row }) =>
+        activeFilters.every(([colName, needle]) => {
+          const cIdx = result.columns.findIndex((c) => c.name === colName);
+          if (cIdx === -1) return true;
+          const cell = row[cIdx];
+          const text = !cell || isDbValueNull(cell as any) ? '' : String((cell as any).val ?? '');
+          return text.toLowerCase().includes(needle.trim().toLowerCase());
+        })
+      );
+    }
 
     if (!sortState) return rowsWithIdx;
 
@@ -197,7 +216,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
       return sortState.direction === 'asc' ? cmp : -cmp;
     });
-  }, [result, sortState, edits]);
+  }, [result, sortState, edits, colFilters]);
 
   // WP9-P1-6: 大结果集保护 — 超过上限只渲染前 N 行 (数据仍全量在内存, 排序作用于全量, 导出不受影响)
   const totalLoaded = sortedOriginalRows.length;
@@ -298,12 +317,20 @@ export const DataGrid: React.FC<DataGridProps> = ({
   if (!result) {
     // WP9-P1-7: 三态分明 — 失败(红) / 0行(result非null走下方空行提示) / 未执行(灰)
     if (error) {
+      // WP9-P2-4: 原始报错完整展示 + 常见 PG 错误附加人话建议 (无匹配则不编造)
+      const hint = explainPgError(error);
       return (
         <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-xs select-none p-6" data-testid="grid-state-error">
           <AlertTriangle className="w-8 h-8 text-red-500 mb-2" />
           <span className="font-bold text-red-400 mb-1">查询执行失败</span>
           <span className="text-red-300/80 font-mono text-[11px] break-all max-w-xl text-center">{error}</span>
-          <span className="text-slate-500 mt-2 text-[10px]">修正 SQL 后重新执行；也可让 AI 解释此错误</span>
+          {hint && (
+            <div className="mt-3 max-w-xl px-3 py-2 rounded-lg bg-blue-500/10 border border-blue-500/30 text-left" data-testid="grid-error-hint">
+              <div className="text-blue-300 text-[11px] font-semibold mb-0.5">💡 {hint.explain}</div>
+              <div className="text-slate-400 text-[10px] leading-relaxed">{hint.suggestion}</div>
+            </div>
+          )}
+          <span className="text-slate-500 mt-2 text-[10px]">修正 SQL 后重新执行；也可点错误横幅上的「让 AI 解释此错误」</span>
         </div>
       );
     }
@@ -439,6 +466,18 @@ export const DataGrid: React.FC<DataGridProps> = ({
             </span>
           </div>
         )}
+        {/* WP9-P2-1: 筛选生效横幅 — 明示"仅已加载行"范围, 防止误当全库过滤 */}
+        {Object.values(colFilters).some((v) => v.trim()) && (
+          <div
+            className="sticky top-0 z-10 px-3 py-1 bg-blue-500/10 border-b border-blue-500/30 text-blue-300 text-[10px] font-medium flex items-center gap-2"
+            data-testid="filter-banner"
+          >
+            <Filter className="w-3 h-3 shrink-0" />
+            <span>
+              列筛选生效: {totalLoaded.toLocaleString()}/{result.rows.length.toLocaleString()} 行匹配（仅过滤已加载数据，非全库查询）
+            </span>
+          </div>
+        )}
         <table className="w-full text-left border-collapse font-sans">
           <thead>
             <tr className="bg-[#141720] text-slate-200 border-b border-[#1c202a] sticky top-0 shadow z-10 font-mono">
@@ -503,6 +542,40 @@ export const DataGrid: React.FC<DataGridProps> = ({
                   </th>
                 );
               })}
+            </tr>
+            {/* WP9-P2-1: 列快速筛选行 (仅过滤已加载行) */}
+            <tr className="bg-[#0a0c10] border-b border-slate-800">
+              <th className="px-1 py-1 border-r border-[#181c25] text-center align-middle">
+                {Object.values(colFilters).some((v) => v.trim()) ? (
+                  <button
+                    onClick={() => setColFilters({})}
+                    className="text-[9px] text-amber-400 hover:text-amber-300 font-bold px-1"
+                    title="清除全部列筛选"
+                    data-testid="clear-col-filters"
+                  >
+                    清除
+                  </button>
+                ) : (
+                  <Filter className="w-3 h-3 text-slate-600 mx-auto" />
+                )}
+              </th>
+              {result.columns.map((col) => (
+                <th key={`f_${col.name}`} className="px-1 py-1 border-r border-[#181c25]">
+                  <input
+                    type="text"
+                    value={colFilters[col.name] || ''}
+                    onChange={(e) => setColFilters((prev) => ({ ...prev, [col.name]: e.target.value }))}
+                    placeholder="筛选…"
+                    aria-label={`筛选列 ${col.name}`}
+                    className={`w-full min-w-[60px] bg-slate-900/80 border rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none transition-colors ${
+                      (colFilters[col.name] || '').trim()
+                        ? 'border-amber-500/60 text-amber-200 focus:border-amber-400'
+                        : 'border-slate-700/60 text-slate-300 placeholder-slate-600 focus:border-blue-500'
+                    }`}
+                    spellCheck={false}
+                  />
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[12px]">

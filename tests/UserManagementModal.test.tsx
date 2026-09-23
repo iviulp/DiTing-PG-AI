@@ -264,8 +264,9 @@ describe('WP8: UserManagementModal 黑屏缺陷复现与修复验证', () => {
     fireEvent.change(search, { target: { value: 'READONLY' } });
     await waitFor(() => expect(screen.queryByText('yuguosheng')).toBeNull());
     expect(screen.getByText('readonly_user')).toBeTruthy();
-    // 计数提示
-    expect(screen.getByText(/匹配 1/)).toBeTruthy();
+    // WP9-P2-3 后计数改为 chips 行 "1/3" 格式
+    const chips = screen.getByTestId('user-attr-chips');
+    expect(chips.textContent).toContain('1/3');
   });
 
   it('P0-4: 搜索无结果 → 空状态提示 (不静默空白)', async () => {

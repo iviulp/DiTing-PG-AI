@@ -103,6 +103,19 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   // WP9-P0: 左侧用户面板可拖拽调宽 + 搜索过滤 (用户点名痛点: 固定 w-64 不可拉宽, 长角色名显示不全)
   const [userPanelWidth, setUserPanelWidth] = useState(256);
   const [userSearch, setUserSearch] = useState('');
+  // WP9-P2-3: 属性筛选 chips (全部 / SUPERUSER / 可登录)
+  const [userAttrFilter, setUserAttrFilter] = useState<'all' | 'superuser' | 'login'>('all');
+  // WP9-P2-2: 本次会话权限变更历史 (审计回溯: 时间+SQL+结果), 可导出
+  const [changeHistory, setChangeHistory] = useState<
+    Array<{ at: string; sql: string; ok: boolean; error?: string }>
+  >([]);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const recordChange = (sql: string, ok: boolean, error?: string) => {
+    setChangeHistory((prev) => [
+      ...prev,
+      { at: new Date().toLocaleTimeString('zh-CN', { hour12: false }), sql, ok, error },
+    ]);
+  };
   const resizingRef = React.useRef(false);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -137,12 +150,16 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     document.body.style.userSelect = 'none';
   };
 
-  // 搜索过滤后的用户列表 (大小写不敏感子串匹配)
+  // 搜索 + 属性过滤后的用户列表 (WP9-P2-3: 大小写不敏感子串匹配 + SUPERUSER/可登录 chips)
   const filteredUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter((u) => u.username.toLowerCase().includes(q));
-  }, [users, userSearch]);
+    return users.filter((u) => {
+      if (q && !u.username.toLowerCase().includes(q)) return false;
+      if (userAttrFilter === 'superuser' && !u.isSuperuser) return false;
+      if (userAttrFilter === 'login' && !u.canLogin) return false;
+      return true;
+    });
+  }, [users, userSearch, userAttrFilter]);
 
   const handleSelectUser = (u: DbUser) => {
     selectedUserRef.current = u.username;
@@ -378,10 +395,12 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     const sql = `CREATE ROLE "${ident}" WITH LOGIN ${superSql} ${pwdSql};`;
     try {
       await executeSql(connId, sql, true); // WP1: CREATE ROLE 走 UI 自有确认流, force 豁免 Critical 弹框
+      recordChange(sql.replace(/PASSWORD '[^']*'/, "PASSWORD '[REDACTED]'"), true);
       setShowAddUserModal(false);
       setBanner({ kind: 'success', text: `用户 "${newUsername}" 创建成功` });
       await reloadUsers();
     } catch (err: any) {
+      recordChange(sql.replace(/PASSWORD '[^']*'/, "PASSWORD '[REDACTED]'"), false, errToStr(err));
       setBanner({ kind: 'error', text: `创建用户失败: ${errToStr(err)}` });
     }
   };
@@ -410,9 +429,11 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
           danger: true,
         })
       );
+      recordChange(`DROP ROLE IF EXISTS "${ident}";`, true);
       setBanner({ kind: 'success', text: `用户 "${uname}" 已删除` });
       await reloadUsers();
     } catch (err: any) {
+      recordChange(`DROP ROLE IF EXISTS "${ident}";`, false, errToStr(err));
       setBanner({ kind: 'error', text: `删除用户失败: ${errToStr(err)}` });
     }
   };
@@ -589,8 +610,10 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     for (const stmt of sqlStatements) {
       try {
         await executeSql(connId, stmt, true); // WP1: ACL 变更已经过矩阵 UI 用户确认
+        recordChange(stmt, true);
       } catch (e: any) {
         console.error('SQL Execution Failed:', stmt, e);
+        recordChange(stmt, false, errToStr(e));
         errors.push(`• ${stmt}\n  原因: ${errToStr(e)}`);
       }
     }
@@ -708,11 +731,77 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
               <p className="text-xs text-slate-400">遵循 PostgreSQL ACL 授权机制与系统目录规范，严密管理模式访问与表级数据读写</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
+          <div className="flex items-center gap-2">
+            {/* WP9-P2-2 顺手修复: 新建用户表单原本无入口 (死 UI) — header 补按钮 */}
+            <button
+              onClick={() => { setNewUsername(''); setNewPassword(''); setNewIsSuperuser(false); setShowAddUserModal(true); }}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow transition-colors"
+              title="新建数据库用户 (Create New Role)"
+              data-testid="open-add-user"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>新建用户</span>
+            </button>
+            <button onClick={onClose} className="text-slate-400 hover:text-white p-1" aria-label="关闭">✕</button>
+          </div>
         </div>
 
         {/* WP8-S4: inline 错误/成功横幅 — 替代 WKWebView 中 no-op 的 alert */}
         <InlineBanner banner={banner} onDismiss={() => setBanner(null)} />
+
+        {/* WP9-P2-2: 本次会话权限变更历史 (审计回溯, 可导出) */}
+        {changeHistory.length > 0 && (
+          <div className="px-4 border-b border-slate-800/80 bg-[#0d0f14]/60 shrink-0" data-testid="change-history">
+            <button
+              onClick={() => setIsHistoryOpen((v) => !v)}
+              className="w-full py-1.5 flex items-center justify-between text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              <span className="flex items-center gap-1.5 font-semibold">
+                📜 本次会话变更历史 ({changeHistory.length} 条,
+                {changeHistory.filter((h) => h.ok).length} 成功
+                {changeHistory.some((h) => !h.ok) ? ` / ${changeHistory.filter((h) => !h.ok).length} 失败` : ''})
+              </span>
+              <span className="flex items-center gap-2">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const text = changeHistory
+                      .map((h) => `[${h.at}] ${h.ok ? 'OK ' : 'FAIL'} ${h.sql}${h.error ? ` -- ${h.error}` : ''}`)
+                      .join('\n');
+                    navigator.clipboard.writeText(text);
+                  }}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 border border-slate-700 cursor-pointer"
+                  title="复制全部变更历史 (文本)"
+                  data-testid="copy-history"
+                >
+                  复制导出
+                </span>
+                <span>{isHistoryOpen ? '▲' : '▼'}</span>
+              </span>
+            </button>
+            {isHistoryOpen && (
+              <div className="max-h-32 overflow-y-auto pb-2 space-y-1" data-testid="change-history-list">
+                {changeHistory.map((h, i) => (
+                  <div
+                    key={i}
+                    className={`text-[10px] font-mono px-2 py-1 rounded border ${
+                      h.ok
+                        ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-300/90'
+                        : 'bg-red-500/5 border-red-500/25 text-red-300/90'
+                    }`}
+                  >
+                    <span className="text-slate-500 mr-1.5">{h.at}</span>
+                    <span className={h.ok ? 'text-emerald-400' : 'text-red-400'}>{h.ok ? '✓' : '✗'}</span>{' '}
+                    <span className="break-all">{h.sql}</span>
+                    {h.error && <div className="text-red-400/80 mt-0.5 break-all">↳ {h.error}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex-1 flex overflow-hidden">
           {/* WP9-P0: 左侧用户面板 — 可拖拽调宽 + 搜索过滤 + 长角色名可见 + 空状态 */}
@@ -744,8 +833,29 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                   </button>
                 )}
               </div>
-              <div className="mt-1.5 px-0.5 text-[10px] text-slate-500 font-mono">
-                共 {users.length} 个角色{userSearch.trim() ? ` · 匹配 ${filteredUsers.length}` : ''}
+              {/* WP9-P2-3: 属性 chips */}
+              <div className="mt-1.5 flex items-center gap-1" data-testid="user-attr-chips">
+                {([
+                  ['all', '全部'],
+                  ['superuser', 'SUPERUSER'],
+                  ['login', '可登录'],
+                ] as const).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setUserAttrFilter(val)}
+                    className={`px-1.5 py-0.5 rounded-md text-[9px] font-semibold border transition-colors ${
+                      userAttrFilter === val
+                        ? 'bg-blue-600/30 border-blue-500/60 text-blue-300'
+                        : 'bg-slate-800/50 border-slate-700/60 text-slate-400 hover:text-slate-200'
+                    }`}
+                    data-testid={`attr-chip-${val}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <span className="ml-auto text-[9px] text-slate-500 font-mono">
+                  {filteredUsers.length}/{users.length}
+                </span>
               </div>
             </div>
 
@@ -755,7 +865,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                 <div className="mt-8 px-3 text-center text-[11px] text-slate-500 leading-relaxed">
                   {users.length === 0
                     ? '未加载到任何角色。请确认连接正常且当前账号可读取 pg_roles。'
-                    : `没有匹配 "${userSearch}" 的角色`}
+                    : `没有匹配${userSearch.trim() ? ` "${userSearch}"` : ''}${userAttrFilter !== 'all' ? ` (${userAttrFilter === 'superuser' ? 'SUPERUSER' : '可登录'})` : ''} 的角色`}
                 </div>
               ) : (
                 filteredUsers.map((u) => (
