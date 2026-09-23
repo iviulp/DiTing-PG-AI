@@ -162,18 +162,18 @@
 | P1-9 | 面板布局持久化（宽度/AI 侧栏开合） | App.tsx react-resizable-panels | Group 加 autoSaveId（库内置 localStorage 持久化） | S | 全栈 |
 
 ### P2（次轮实施）
-| # | 项 | 说明 | 工作量 |
-|---|----|------|--------|
-| P2-1 | DataGrid 列头快速筛选（前端过滤已加载行，明示范围） | M |
-| P2-2 | 权限变更会话历史面板（UserManagementModal 内折叠，可导出） | M |
-| P2-3 | 用户列表属性 chips 筛选（全部/SUPERUSER/可登录） | S |
-| P2-4 | 常见 PG 错误码人话建议映射（28000/3D000/08001…） | M |
-| P2-5 | 编辑器报错旁"让 AI 解释此错误"按钮（自动带 SQL+报错） | M |
-| P2-6 | RowDetailDrawer JSON pretty-print | S |
-| P2-7 | DataGrid 粘贴多行 TSV 造数 | M |
-| P2-8 | ProcessListModal 自动刷新开关（2s/5s/关） | S |
-| P2-9 | 快捷键速查表弹窗（? 按钮） | S |
-| P2-10 | ConnectionModal 分区折叠 | M |
+| # | 项 | 说明 | 工作量 | 状态 |
+|---|----|------|--------|------|
+| P2-1 | DataGrid 列头快速筛选（前端过滤已加载行，明示范围） | M | ✅ `d18118e` |
+| P2-2 | 权限变更会话历史面板（UserManagementModal 内折叠，可导出，密码 [REDACTED]） | M | ✅ `d18118e`（顺手修复：新建用户表单原无入口的死 UI） |
+| P2-3 | 用户列表属性 chips 筛选（全部/SUPERUSER/可登录） | S | ✅ `d18118e` |
+| P2-4 | 常见 PG 错误码人话建议映射（15 类，组内 AND 组间 OR） | M | ✅ `d18118e`（测试用 ux_demo 真实 psql 报错文本） |
+| P2-5 | 错误横幅"让 AI 解释此错误"按钮（打开侧栏 currentError 驱动修复） | M | ✅ `d18118e` |
+| P2-6 | RowDetailDrawer JSON pretty-print | S | ✅ 核实已存在（renderJsonPretty），无需改动 |
+| P2-7 | DataGrid 粘贴多行 TSV 造数（表头跳过/截断明示/仅可写集） | M | ✅ `ef76fb6` |
+| P2-8 | ProcessListModal 自动刷新开关（2s/5s/关）+ 失败显式横幅 | S | ✅ `d18118e` |
+| P2-9 | 快捷键速查表弹窗（? 按钮，Esc 栈最上层） | S | ✅ `ef76fb6` |
+| P2-10 | ConnectionModal 分区折叠 | M | ✅ 核实已是 general/ssh 两 Tab 分页结构，诉求已被满足，不为改而改 |
 
 ### P3（backlog）
 - 导出 .ditingvault 选择性勾选连接；表右键"AI 造测试数据"；AI 表格单元格点击展开；DataGrid 虚拟滚动（若 P1-6 不够）；CLI 历史发送到主编辑器（确认现状后定）。
