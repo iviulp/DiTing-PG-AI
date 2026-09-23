@@ -13,6 +13,7 @@ interface ShortcutsHelpModalProps {
 const SHORTCUTS: Array<{ keys: string; desc: string }> = [
   { keys: 'Cmd/Ctrl + Enter', desc: '执行编辑器中的 SQL（Monaco 焦点内或全局）' },
   { keys: 'Cmd/Ctrl + R', desc: '执行 SQL（全局兜底，任意焦点）' },
+  { keys: 'Cmd/Ctrl + ← / →', desc: '分页模式：上一页 / 下一页（输入框焦点内不抢）' },
   { keys: 'Cmd/Ctrl + B', desc: '显示 / 隐藏 AI 协同侧栏' },
   { keys: 'Esc', desc: '关闭最上层弹窗（按打开优先级逐个关闭）' },
 ];
@@ -26,6 +27,8 @@ const TIPS: Array<{ icon: string; title: string; desc: string }> = [
   { icon: '👥', title: '用户管理', desc: '右键连接 → 用户管理：左侧面板可拖宽、可搜索、可按 SUPERUSER/可登录筛选；变更历史可导出审计' },
   { icon: '🔒', title: '安全管道', desc: '高危 SQL（DROP/TRUNCATE 等）后端 AST 判定并二次确认；只读模式强制 SELECT' },
   { icon: '📡', title: 'SSH 隧道', desc: '头部"隧道断开"角标可直接点击一键重连' },
+  { icon: '📄', title: '自动分页', desc: '单条 SELECT（含手写 SQL）自动分页：先 COUNT 给总数，翻页自动发 LIMIT/OFFSET SQL；分页条可跳页/改每页行数/查看本页 SQL' },
+  { icon: '⚗️', title: '可视化过滤', desc: '分页工具条"过滤"按钮：列名自动带出、操作符按类型适配、值输入特化，实时预览生成的 WHERE，不用手写' },
 ];
 
 export const ShortcutsHelpModal: React.FC<ShortcutsHelpModalProps> = ({ isOpen, onClose }) => {

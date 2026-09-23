@@ -716,6 +716,24 @@ export const App: React.FC = () => {
                 setExportMode('ddl');
                 setIsExportOpen(true);
               }}
+              onBrowseTable={(tbl) => {
+                // WP10: 右键"分页浏览与过滤" — 与单击同链路 + 直接开过滤构建器
+                setDesignerTable(tbl);
+                const [schema, table] = tbl.includes('.')
+                  ? [tbl.split('.')[0], tbl.split('.').slice(1).join('.')]
+                  : ['public', tbl];
+                browseTable(schema, table);
+                getTableColumnsMetaData(activeConnId || '', table, schema)
+                  .then((cols) => {
+                    setBrowseColumns((cols || []).map((c: any) => ({
+                      column_name: c.column_name ?? String(c[0]?.val ?? ''),
+                      data_type: c.data_type ?? String(c[1]?.val ?? ''),
+                      column_comment: c.column_comment ?? (c[3]?.val ?? null),
+                    })));
+                    setIsFilterBuilderOpen(true);
+                  })
+                  .catch(() => setBrowseColumns([]));
+              }}
             />
 
 

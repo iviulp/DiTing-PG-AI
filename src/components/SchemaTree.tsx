@@ -11,6 +11,8 @@ interface SchemaTreeProps {
   onDesignTable: (tableName: string) => void;
   onExportTable?: (tableName: string) => void;
   onExportDdl?: (tableName: string) => void;
+  /** WP10: 浏览表模式入口 (分页+过滤构建器) */
+  onBrowseTable?: (tableName: string) => void;
 }
 
 
@@ -26,6 +28,7 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
   onDesignTable,
   onExportTable,
   onExportDdl,
+  onBrowseTable,
 }) => {
   const [items, setItems] = useState<SchemaItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -219,6 +222,19 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
           >
             <span>Open Data (查看表数据)</span>
           </div>
+          {/* WP10: 浏览模式 = 分页 + 过滤构建器 (单击表默认已进入, 此入口供右键直达) */}
+          {onBrowseTable && (
+            <div
+              onClick={() => {
+                onBrowseTable(contextMenu.tableName);
+                closeContextMenu();
+              }}
+              className="px-3 py-2 hover:bg-purple-600 hover:text-white cursor-pointer flex items-center justify-between text-purple-300 font-semibold"
+              data-testid="ctx-browse-table"
+            >
+              <span>Browse & Filter (分页浏览与过滤)</span>
+            </div>
+          )}
           <div
             onClick={() => {
               onDesignTable(contextMenu.tableName);

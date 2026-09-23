@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { showConfirm } from '../services/appDialog';
 import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '../types';
 import {
   executeSqlWithGuard,
@@ -360,6 +361,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (est !== null) {
         set((st) => st.paging ? { paging: { ...st.paging, total: est, totalIsEstimate: true } } : {});
       }
+      // WP10-D1 (SRE 会议): 估算 > 500 万行 → 精确 COUNT 可能慢, 先征得同意
+      let wantExactCount = true;
+      if (est !== null && est > 5_000_000) {
+        wantExactCount = await showConfirm(
+          `表 "${schema}.${table}" 估算约 ${est.toLocaleString()} 行。\n\n精确计数 (SELECT count(*)) 在大表上可能较慢。\n\n要执行精确计数吗？（取消则只用估算，仍可正常翻页，末页/跳页按钮会禁用）`,
+          { title: '大表精确计数确认', confirmText: '精确计数 (可能较慢)' }
+        );
+      }
+
       // ② PK 列 (翻页稳定排序)
       let pk: string[] = [];
       try {
@@ -370,17 +380,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       const req = { schema, table, filters: p.filters, combinator: p.combinator,
                     orderByColumns: pk, orderByDirection: 'ASC' as const, page: 1, pageSize };
 
-      // ③ 精确 COUNT (替换估算)
-      const countSql = buildTableCountSql(req);
-      try {
-        const cntRes = await executeSql(activeConnId, countSql);
-        const totalVal = cntRes?.rows?.[0]?.[0]?.val;
-        const total = totalVal === null || totalVal === undefined ? null : Number(totalVal);
-        set((st) => st.paging ? { paging: { ...st.paging, total: Number.isFinite(total as number) ? total : null, totalIsEstimate: false } } : {});
-      } catch (err) {
-        // COUNT 失败 (如无权限): 分页条显示"总数不可用", 翻页仍可用 (分析师会议 #4)
-        console.warn('count failed:', err);
-        set((st) => st.paging ? { paging: { ...st.paging, total: null, totalIsEstimate: false } } : {});
+      // ③ 精确 COUNT (替换估算; D1: 大表用户选"只用估算"则跳过, 保持估算态)
+      if (wantExactCount) {
+        const countSql = buildTableCountSql(req);
+        try {
+          const cntRes = await executeSql(activeConnId, countSql);
+          const totalVal = cntRes?.rows?.[0]?.[0]?.val;
+          const total = totalVal === null || totalVal === undefined ? null : Number(totalVal);
+          set((st) => st.paging ? { paging: { ...st.paging, total: Number.isFinite(total as number) ? total : null, totalIsEstimate: false } } : {});
+        } catch (err) {
+          // COUNT 失败 (如无权限): 有估算则保留估算, 否则"总数不可用"; 翻页仍可用 (分析师会议 #4)
+          console.warn('count failed:', err);
+          set((st) => st.paging ? { paging: { ...st.paging, total: st.paging.total, totalIsEstimate: st.paging.totalIsEstimate } } : {});
+        }
       }
 
       // ④ 第 1 页数据

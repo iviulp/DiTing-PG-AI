@@ -135,7 +135,7 @@ describe('WP10: store.browseTable — 估算→PK→COUNT→第1页 (真实 SQL 
     expect(rows[0][3].val).toBe('cancelled');
   });
 
-  it('COUNT 失败 → total=null "总数不可用", 翻页仍工作 (分析师会议 #4)', async () => {
+  it('COUNT 失败 → 保留估算值 (约 6 行), 翻页仍工作 (分析师会议 #4 + D1 语义)', async () => {
     invokeMock.mockImplementation((_cmd: string, args: any) => {
       const sql = args?.sql || '';
       if (_cmd === 'execute_sql') {
@@ -150,9 +150,28 @@ describe('WP10: store.browseTable — 估算→PK→COUNT→第1页 (真实 SQL 
     });
     await act(async () => { await useAppStore.getState().browseTable('shop', 'orders'); });
     const p = useAppStore.getState().paging!;
-    expect(p.total).toBeNull();
+    // COUNT 失败但 reltuples 估算成功 → 保留估算 (totalIsEstimate 仍 true)
+    expect(p.total).toBe(6);
+    expect(p.totalIsEstimate).toBe(true);
     // 数据页仍然拉到了 (COUNT 失败不阻塞)
     expect(useAppStore.getState().queryResult!.rows.length).toBe(6);
+  });
+
+  it('reltuples 与 COUNT 都失败 → total=null "总数不可用"', async () => {
+    invokeMock.mockImplementation((_cmd: string, args: any) => {
+      const sql = args?.sql || '';
+      if (_cmd === 'execute_sql') {
+        if (sql.includes('reltuples') || sql.includes('count(*)')) {
+          return Promise.reject({ message: 'ERROR: permission denied' });
+        }
+        return Promise.resolve(routeSql(sql));
+      }
+      return Promise.resolve(null);
+    });
+    await act(async () => { await useAppStore.getState().browseTable('shop', 'orders'); });
+    const p = useAppStore.getState().paging!;
+    expect(p.total).toBeNull();
+    expect(useAppStore.getState().queryResult!.rows.length).toBe(6); // 数据页不受影响
   });
 });
 
