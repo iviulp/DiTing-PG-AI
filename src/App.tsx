@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Group, Panel, Separator } from 'react-resizable-panels';
+import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
+import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { useAppStore } from './store/useAppStore';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { SqlEditor } from './components/SqlEditor';
@@ -83,6 +84,31 @@ export const App: React.FC = () => {
   const [headerContextMenu, setHeaderContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const [designerTable, setDesignerTable] = useState('users');
+
+  // WP9-P1-9: 面板布局持久化 (react-resizable-panels v4 useDefaultLayout + localStorage)
+  const mainLayout = useDefaultLayout({ id: 'aidb-main-h', storage: localStorage });
+  const centerLayout = useDefaultLayout({ id: 'aidb-center-v', storage: localStorage });
+
+  // WP9-P1-1: 全局快捷键 (抽取为可测 hook: Esc 关最上层弹窗 / Cmd+B 切 AI 侧栏 / Cmd+R 执行 SQL)
+  useGlobalShortcuts({
+    modals: [
+      { isOpen: isUserMgmtOpen, close: () => setIsUserMgmtOpen(false) },
+      { isOpen: isProcessModalOpen, close: () => setIsProcessModalOpen(false) },
+      { isOpen: isDesignerOpen, close: () => setIsDesignerOpen(false) },
+      { isOpen: isExportOpen, close: () => setIsExportOpen(false) },
+      { isOpen: isSavedSqlOpen, close: () => setIsSavedSqlOpen(false) },
+      { isOpen: isCliConsoleOpen, close: () => setIsCliConsoleOpen(false) },
+      { isOpen: isSettingsOpen, close: () => setIsSettingsOpen(false) },
+      { isOpen: isConnModalOpen, close: () => setIsConnModalOpen(false) },
+    ],
+    onExecute: (selectedSql?: string) => handleExecuteRef.current?.(selectedSql),
+    onToggleAiSidebar: () => setIsAiSidebarOpen((v) => !v),
+  });
+
+  // ref 同步: 每次 render 指向最新 handleExecute (定义在其下方, 但 effect 在 render 后执行故安全)
+  useEffect(() => {
+    handleExecuteRef.current = handleExecute;
+  });
 
 
 
@@ -183,6 +209,8 @@ export const App: React.FC = () => {
     return clean.trim();
   };
 
+  // WP9-P1-1: 快捷键层通过 ref 调用最新 handleExecute (避免 effect 依赖爆炸)
+  const handleExecuteRef = React.useRef<((selectedSql?: string) => Promise<void>) | null>(null);
   const handleExecute = async (selectedSql?: string) => {
     // 优先获取选中的 SQL；若未选中，则取主编辑区全部文本
     const sourceSql = (selectedSql !== undefined ? selectedSql : sqlText).trim();
@@ -440,12 +468,18 @@ export const App: React.FC = () => {
             <span>{activeConn?.name}</span>
             {/* WP3: 隧道断开角标 */}
             {activeConn && tunnelDownConns.includes(activeConn.id) && (
-              <span
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-400 text-[10px] font-bold"
-                title="SSH 隧道已断开，请重新连接"
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // WP9-P1-8: 一键重连 — 复用完整连接流程 (重建 SSH 隧道 + DB 连接)
+                  handleSelectConnection(activeConn);
+                }}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-400 text-[10px] font-bold hover:bg-red-500/30 hover:text-red-300 transition-colors cursor-pointer"
+                title="SSH 隧道已断开 — 点击一键重连"
+                data-testid="tunnel-reconnect"
               >
-                隧道断开
-              </span>
+                ⟳ 隧道断开·点击重连
+              </button>
             )}
           </div>
 
@@ -578,7 +612,11 @@ export const App: React.FC = () => {
 
       {/* Main Workspace Layout (全自由 0-100% 拖拽编排) */}
       <div className="flex-1 overflow-hidden">
-        <Group orientation="horizontal">
+        <Group
+          orientation="horizontal"
+          defaultLayout={mainLayout.defaultLayout}
+          onLayoutChanged={mainLayout.onLayoutChanged}
+        >
           {/* Left Pane: Schema Tree Explorer */}
           <Panel defaultSize={20} minSize={0}>
             <SchemaTree
@@ -619,7 +657,11 @@ export const App: React.FC = () => {
 
           {/* Center Pane: Monaco SQL Editor + Data Grid Split Pane */}
           <Panel defaultSize={55} minSize={0}>
-            <Group orientation="vertical">
+            <Group
+              orientation="vertical"
+              defaultLayout={centerLayout.defaultLayout}
+              onLayoutChanged={centerLayout.onLayoutChanged}
+            >
               {/* Top Half: Monaco SQL Editor */}
               <Panel defaultSize={45} minSize={0}>
                 <div className="h-full w-full bg-[#111318]">
@@ -638,6 +680,7 @@ export const App: React.FC = () => {
                 <div className="h-full w-full bg-[#0d0f14]">
                   <DataGrid
                     result={queryResult}
+                    error={errorMsg}
                     resultTabs={resultTabs}
                     activeTabId={activeResultTabId}
                     onSelectTab={(tabId) => {
@@ -657,7 +700,7 @@ export const App: React.FC = () => {
                       if (!queryResult || !activeConnId) return;
 
                       // 尝试定位表名 (从 sqlText 中正则匹配 SELECT ... FROM "tableName" 或 tableName)
-                      const fromMatch = sqlText.match(/FROM\s+["`']?([a-zA-Z0-9_.]+ Vacation|["`']?[a-zA-Z0-9_.]+)["`']?/i) || sqlText.match(/FROM\s+["`']?([a-zA-Z0-9_]+)/i);
+                      const fromMatch = sqlText.match(/FROM\s+["`']?([a-zA-Z0-9_.]+)["`']?/i);
                       let targetTable = fromMatch ? fromMatch[1].replace(/["`']/g, '') : null;
                       if (!targetTable || targetTable.toLowerCase() === 'dual') {
                         targetTable = designerTable;
@@ -780,6 +823,7 @@ export const App: React.FC = () => {
               <Panel defaultSize={25} minSize={0}>
                 <AiSidebar
                   onInsertSql={(sql) => setSqlText(sql)}
+                  onExecuteSql={(sql) => handleExecute(sql)}
                   currentSql={sqlText}
                   currentError={errorMsg}
                   activeDatabase={activeDatabase || activeConn?.database}

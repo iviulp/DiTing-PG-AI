@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { SchemaItem } from '../types';
 import { getTableSchema , errToStr } from '../services/ipc';
-import { Table, Eye, Folder, ChevronRight, ChevronDown, RefreshCw, Layers } from 'lucide-react';
+import { Table, Eye, Folder, ChevronRight, ChevronDown, RefreshCw, Layers, Search, X } from 'lucide-react';
 
 interface SchemaTreeProps {
   connId: string;
@@ -34,6 +34,8 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tableName: string } | null>(null);
 
   const [schemaError, setSchemaError] = useState<string | null>(null);
+  // WP9-P1-4: 表/视图即时过滤 (大小写不敏感); 过滤时强制展开分组
+  const [filterText, setFilterText] = useState('');
 
   const fetchSchema = async () => {
     setLoading(true);
@@ -67,8 +69,11 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
     return () => window.removeEventListener('click', closeContextMenu);
   }, []);
 
-  const tables = items.filter((i) => i.item_type === 'table');
-  const views = items.filter((i) => i.item_type === 'view');
+  const filterLc = filterText.trim().toLowerCase();
+  const matchFilter = (name: string) => !filterLc || name.toLowerCase().includes(filterLc);
+  const tables = items.filter((i) => i.item_type === 'table' && matchFilter(i.name));
+  const views = items.filter((i) => i.item_type === 'view' && matchFilter(i.name));
+  const totalMatched = tables.length + views.length;
 
   return (
     <div className="h-full bg-slate-900 border-r border-slate-800 flex flex-col font-sans select-none text-slate-300">
@@ -94,6 +99,36 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
         </button>
       </div>
 
+      {/* WP9-P1-4: 过滤框 */}
+      <div className="px-2 py-1.5 border-b border-slate-800/80">
+        <div className="relative">
+          <Search className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+          <input
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="过滤表 / 视图…"
+            aria-label="过滤表和视图"
+            className="w-full bg-slate-800/70 border border-slate-700 rounded-lg pl-7 pr-6 py-1 text-[11px] text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors font-mono"
+            spellCheck={false}
+          />
+          {filterText && (
+            <button
+              onClick={() => setFilterText('')}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-500 hover:text-white rounded"
+              aria-label="清除过滤"
+              data-testid="schema-filter-clear"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+        {filterLc && (
+          <div className="mt-1 text-[9px] text-slate-500 px-1" data-testid="schema-filter-count">
+            匹配 {totalMatched} 项{totalMatched === 0 ? ' — 无匹配对象' : ''}
+          </div>
+        )}
+      </div>
+
       {/* Tree Content */}
       <div className="flex-1 overflow-auto p-2 space-y-3">
         {schemaError && (
@@ -116,7 +151,7 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
             <span>Tables ({tables.length})</span>
           </div>
 
-          {isTablesExpanded && (
+          {(isTablesExpanded || filterLc) && (
             <div className="pl-4 space-y-0.5 mt-0.5">
               {tables.map((t) => {
                 const isCurrentActive = selectedTable === t.name;
@@ -151,7 +186,7 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
             <span>Views ({views.length})</span>
           </div>
 
-          {isViewsExpanded && (
+          {(isViewsExpanded || filterLc) && (
             <div className="pl-4 space-y-0.5 mt-0.5">
               {views.map((v) => (
                 <div

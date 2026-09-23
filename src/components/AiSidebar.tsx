@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { getTableSchema, getTableColumnsMetaData, executeSql , errToStr } from '../services/ipc';
 import { QueryResult } from '../types';
+import { showConfirm } from '../services/appDialog';
 import {
   Bot,
   Send,
   Sparkles,
+  Eraser,
   Table as TableIcon,
   RefreshCw,
   Copy,
@@ -20,12 +22,18 @@ import {
 
 interface AiSidebarProps {
   onInsertSql: (sql: string) => void;
+  /** WP9-P1-3: 直接执行 SQL (走 App runQuery — 含 WP1 安全管道 guard) */
+  onExecuteSql?: (sql: string) => void;
   currentSql?: string;
   currentError?: string | null;
   activeDatabase?: string;
 }
 
 type QueryIntent = 'DBA_ADMIN' | 'ERROR_FIX' | 'TABLE_QUERY' | 'GENERAL';
+
+/** WP9-P1-2: 欢迎语常量 — 新会话重置时复用 (与初始 chatLog 一致) */
+const AI_WELCOME_TEXT = '👋 你好！我是 **DiTing AI PostgreSQL 专家协同助手**。\n\n💡 **核心能力**：\n• **智能意图路由**：权限管理/DBA运维/语法直接秒级答复；数据查询精准匹配字段元数据。\n• **@ 快捷补全**：输入 `@` 可快速引用当前库中的数据表与字段。\n• **错误一键修复**：遇到 SQL 报错可点击下方快捷按钮一键诊断。';
+const makeWelcomeMsg = () => ({ role: 'assistant' as const, text: AI_WELCOME_TEXT });
 
 interface ColumnMeta {
   column_name: string;
@@ -35,6 +43,7 @@ interface ColumnMeta {
 
 export const AiSidebar: React.FC<AiSidebarProps> = ({
   onInsertSql,
+  onExecuteSql,
   currentSql,
   currentError,
   activeDatabase,
@@ -63,12 +72,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       isMutating?: boolean;
       intentTag?: string;
     }>
-  >([
-    {
-      role: 'assistant',
-      text: '👋 你好！我是 **DiTing AI PostgreSQL 专家协同助手**。\n\n💡 **核心能力**：\n• **智能意图路由**：权限管理/DBA运维/语法直接秒级答复；数据查询精准匹配字段元数据。\n• **@ 快捷补全**：输入 `@` 可快速引用当前库中的数据表与字段。\n• **错误一键修复**：遇到 SQL 报错可点击下方快捷按钮一键诊断。'
-    }
-  ]);
+  >([makeWelcomeMsg()]);
 
   const { activeConnId, askAi } = useAppStore();
 
@@ -373,6 +377,20 @@ PostgreSQL Data Type & Case Sensitivity Rules:
     inputRef.current?.focus();
   };
 
+  // WP9-P1-2: 新会话 — 清空历史, 重置为欢迎语 (history 取最近20条, 清空即开新上下文)
+  const handleNewSession = async () => {
+    const hasRealChat = chatLog.some((m) => !(m.role === 'assistant' && m.text === AI_WELCOME_TEXT));
+    if (hasRealChat) {
+      const ok = await showConfirm(
+        '将清空当前 AI 对话历史并开启新会话。\n\n（已插入编辑器的 SQL 不受影响）',
+        { title: '开启新会话', confirmText: '清空并新建' }
+      );
+      if (!ok) return;
+    }
+    setChatLog([makeWelcomeMsg()]);
+    inputRef.current?.focus();
+  };
+
   const filteredMentions = tables
     .filter((t) => t.name.toLowerCase().includes(mentionFilter))
     .slice(0, 8);
@@ -389,7 +407,18 @@ PostgreSQL Data Type & Case Sensitivity Rules:
             </span>
           )}
         </div>
-        <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse shrink-0" />
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={handleNewSession}
+            className="p-1 hover:bg-slate-700 text-slate-400 hover:text-white rounded transition-colors"
+            title="开启新会话 (清空对话历史)"
+            aria-label="开启新会话"
+            data-testid="ai-new-session"
+          >
+            <Eraser className="w-3.5 h-3.5" />
+          </button>
+          <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+        </div>
       </div>
 
       <div className="px-3 py-2 border-b border-slate-800 bg-slate-950/70 space-y-2">
@@ -566,6 +595,19 @@ PostgreSQL Data Type & Case Sensitivity Rules:
                               </>
                             )}
                           </button>
+
+                          {/* WP9-P1-3: 直接执行 — 走 App runQuery (WP1 安全管道, 危险语句仍会二次确认) */}
+                          {onExecuteSql && (
+                            <button
+                              onClick={() => onExecuteSql(part.content)}
+                              className="px-2 py-0.5 bg-emerald-600/80 hover:bg-emerald-500 text-white rounded text-[10px] font-semibold flex items-center gap-1 transition-colors shadow"
+                              title="送入主编辑器安全管道执行 (写操作仍会二次确认)"
+                              data-testid="ai-exec-sql"
+                            >
+                              <Play className="w-3 h-3" />
+                              <span>直接执行</span>
+                            </button>
+                          )}
                         </div>
                       </div>
                       <pre className="p-3 overflow-x-auto text-emerald-300 text-[11px] leading-relaxed whitespace-pre-wrap select-text">

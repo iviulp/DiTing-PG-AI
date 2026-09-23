@@ -1,12 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { QueryResult, QueryResultTabItem } from '../types';
-import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle } from 'lucide-react';
+import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle, Copy } from 'lucide-react';
 import { RowDetailDrawer } from './RowDetailDrawer';
 import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
 import { errToStr } from '../services/ipc';
 import { showAlert } from '../services/appDialog';
 
+/** WP9-P1-6: 大结果集渲染上限 — 超过只渲染前 N 行并横幅警示 (数据仍全量在内存, 导出不受影响) */
+const MAX_RENDER_ROWS = 2000;
+
 interface DataGridProps {
+  /** WP9-P1-7: 查询失败错误 (与 result=null 区分"未执行/0行/失败"三态) */
+  error?: string | null;
   result: QueryResult | null;
   resultTabs?: QueryResultTabItem[];
   activeTabId?: string;
@@ -22,6 +27,7 @@ interface DataGridProps {
 
 export const DataGrid: React.FC<DataGridProps> = ({
   result,
+  error,
   resultTabs = [],
   activeTabId,
   onSelectTab,
@@ -57,7 +63,10 @@ export const DataGrid: React.FC<DataGridProps> = ({
     x: number;
     y: number;
     rowIdx: number;
+    colIdx?: number;
   } | null>(null);
+  // WP9-P1-5: 复制成功瞬时反馈
+  const [copyFlash, setCopyFlash] = useState<string | null>(null);
 
   // 清空所有状态当 result 变更
   useEffect(() => {
@@ -190,14 +199,55 @@ export const DataGrid: React.FC<DataGridProps> = ({
     });
   }, [result, sortState, edits]);
 
-  const handleContextMenu = (e: React.MouseEvent, rowIdx: number) => {
+  // WP9-P1-6: 大结果集保护 — 超过上限只渲染前 N 行 (数据仍全量在内存, 排序作用于全量, 导出不受影响)
+  const totalLoaded = sortedOriginalRows.length;
+  const renderTruncated = totalLoaded > MAX_RENDER_ROWS;
+  const visibleRows = renderTruncated ? sortedOriginalRows.slice(0, MAX_RENDER_ROWS) : sortedOriginalRows;
+
+  const handleContextMenu = (e: React.MouseEvent, rowIdx: number, colIdx?: number) => {
     e.preventDefault();
+    e.stopPropagation();
     setSelectedRowIdx(rowIdx);
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
       rowIdx,
+      colIdx,
     });
+  };
+
+  // WP9-P1-5: 复制辅助 (真实单元格值; 瞬时 ✓ 反馈)
+  const flashCopy = (tag: string) => {
+    setCopyFlash(tag);
+    setTimeout(() => setCopyFlash(null), 1200);
+  };
+  const getCellText = (rowIdx: number, colIdx: number): string => {
+    if (!result) return '';
+    const colName = result.columns[colIdx]?.name || `col_${colIdx}`;
+    const key = `${rowIdx}_${colName}`;
+    if (key in edits) return edits[key];
+    if (rowIdx >= result.rows.length) return addedRows[rowIdx - result.rows.length]?.[colName] ?? '';
+    const cell = result.rows[rowIdx]?.[colIdx] ?? { type: 'Null', val: null };
+    return isDbValueNull(cell as any) ? '' : formatDbValue(cell as any);
+  };
+  const copyCellValue = (rowIdx: number, colIdx: number) => {
+    navigator.clipboard.writeText(getCellText(rowIdx, colIdx));
+    flashCopy('cell');
+  };
+  const copyRowCsv = (rowIdx: number) => {
+    if (!result) return;
+    const cells = result.columns.map((_, cIdx) => {
+      const text = getCellText(rowIdx, cIdx);
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    });
+    navigator.clipboard.writeText(cells.join(','));
+    flashCopy('row');
+  };
+  const copyColNameByIdx = (colIdx: number) => {
+    const name = result?.columns[colIdx]?.name;
+    if (!name) return;
+    navigator.clipboard.writeText(name);
+    flashCopy('col');
   };
 
   const handleDiscard = () => {
@@ -246,10 +296,22 @@ export const DataGrid: React.FC<DataGridProps> = ({
   }
 
   if (!result) {
+    // WP9-P1-7: 三态分明 — 失败(红) / 0行(result非null走下方空行提示) / 未执行(灰)
+    if (error) {
+      return (
+        <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-xs select-none p-6" data-testid="grid-state-error">
+          <AlertTriangle className="w-8 h-8 text-red-500 mb-2" />
+          <span className="font-bold text-red-400 mb-1">查询执行失败</span>
+          <span className="text-red-300/80 font-mono text-[11px] break-all max-w-xl text-center">{error}</span>
+          <span className="text-slate-500 mt-2 text-[10px]">修正 SQL 后重新执行；也可让 AI 解释此错误</span>
+        </div>
+      );
+    }
     return (
-      <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-slate-500 text-xs select-none">
+      <div className="h-full w-full flex flex-col items-center justify-center bg-[#0d0f14] text-slate-500 text-xs select-none" data-testid="grid-state-idle">
         <Table className="w-8 h-8 text-slate-700 mb-2" />
-        <span>No dataset executed yet. Run a SQL query to inspect results.</span>
+        <span className="font-semibold text-slate-400">尚未执行查询</span>
+        <span className="text-[10px] mt-1 text-slate-600">在上方编辑器写 SQL 后按 Cmd+Enter 执行，或从左侧 Schema 树选择表</span>
       </div>
     );
   }
@@ -365,6 +427,18 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
       {/* Main Table Grid */}
       <div className="flex-1 overflow-auto bg-[#0d0f14]">
+        {/* WP9-P1-6: 大结果集渲染截断横幅 (真实计数, 不假装全量) */}
+        {renderTruncated && (
+          <div
+            className="sticky top-0 z-20 px-3 py-1.5 bg-amber-500/15 border-b border-amber-500/30 text-amber-300 text-[11px] font-medium flex items-center gap-2 backdrop-blur"
+            data-testid="grid-truncation-banner"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              已加载 {totalLoaded.toLocaleString()} 行，为保障流畅仅渲染前 {MAX_RENDER_ROWS.toLocaleString()} 行；导出功能仍包含全部数据。建议在 SQL 中加 LIMIT / WHERE 缩小结果集。
+            </span>
+          </div>
+        )}
         <table className="w-full text-left border-collapse font-sans">
           <thead>
             <tr className="bg-[#141720] text-slate-200 border-b border-[#1c202a] sticky top-0 shadow z-10 font-mono">
@@ -433,7 +507,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[12px]">
             {/* 1. 原数据库行 (支持智能多数据类型表头列排序) */}
-            {sortedOriginalRows.map(({ row, origIdx: rIdx }, displayIdx) => {
+            {visibleRows.map(({ row, origIdx: rIdx }, displayIdx) => {
               const isMarkedDeleted = pendingDeletions.has(rIdx);
               const isSelected = selectedRowIdx === rIdx;
 
@@ -481,6 +555,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
                     return (
                       <td
                         key={cIdx}
+                        onContextMenu={(e) => handleContextMenu(e, rIdx, cIdx)}
                         onDoubleClick={() => handleCellDoubleClick(rIdx, colName)}
                         className={`px-3 py-1.5 border-r border-[#181c25] whitespace-nowrap max-w-xs truncate h-9 box-border ${
                           isMarkedDeleted
@@ -551,6 +626,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
                     return (
                       <td
                         key={cIdx}
+                        onContextMenu={(e) => handleContextMenu(e, rIdx, cIdx)}
                         onDoubleClick={() => handleCellDoubleClick(rIdx, colName)}
                         className="px-3 py-1.5 border-r border-slate-200 dark:border-slate-800 whitespace-nowrap max-w-xs truncate h-9 box-border"
                         title={displayVal}
@@ -589,6 +665,45 @@ export const DataGrid: React.FC<DataGridProps> = ({
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
+          {/* WP9-P1-5: 复制组 (单元格值 / 行 CSV / 列名) */}
+          {contextMenu.colIdx !== undefined && (
+            <div
+              onClick={() => {
+                copyCellValue(contextMenu.rowIdx, contextMenu.colIdx!);
+                setContextMenu(null);
+              }}
+              className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center gap-2 font-medium"
+              data-testid="ctx-copy-cell"
+            >
+              <Copy className="w-3.5 h-3.5 text-blue-400" />
+              <span>{copyFlash === 'cell' ? '已复制 ✓' : '复制单元格值'}</span>
+            </div>
+          )}
+          <div
+            onClick={() => {
+              copyRowCsv(contextMenu.rowIdx);
+              setContextMenu(null);
+            }}
+            className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center gap-2 font-medium"
+            data-testid="ctx-copy-row"
+          >
+            <Copy className="w-3.5 h-3.5 text-blue-400" />
+            <span>{copyFlash === 'row' ? '已复制 ✓' : '复制整行 (CSV)'}</span>
+          </div>
+          {contextMenu.colIdx !== undefined && (
+            <div
+              onClick={() => {
+                copyColNameByIdx(contextMenu.colIdx!);
+                setContextMenu(null);
+              }}
+              className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center gap-2 font-medium"
+              data-testid="ctx-copy-colname"
+            >
+              <Copy className="w-3.5 h-3.5 text-blue-400" />
+              <span>{copyFlash === 'col' ? '已复制 ✓' : `复制列名 "${result?.columns[contextMenu.colIdx]?.name ?? ''}"`}</span>
+            </div>
+          )}
+
           <div
             onClick={() => {
               setDrawerRowIndex(contextMenu.rowIdx);
