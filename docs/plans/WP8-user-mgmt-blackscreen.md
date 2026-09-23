@@ -319,6 +319,24 @@
 
 > 判定协议：H1/H2 用 S1 管线在稳定版浏览器先行二分（`#root` 空否 + console 错误）；H3-H5 仅当前两者排除后按序验证。无论结论如何，S2-S5（Boundary/契约/对话框/渲染防御）无条件执行——它们同时消除「黑屏不可诊断、无反馈」的共因。
 
+### ✅ 最终判定（2026-09-23 真机证据 + 双向回归验证）
+
+**根因实锤 = H1 的具体形态：React #310「Rendered fewer hooks than expected」(hooks 顺序违规)**
+
+- 用户真机（macOS 27 beta，production 构建）安装的 WP8-S2 全局 ErrorBoundary 成功捕获并显示
+  `Minified React error #310`，证明：① 黑屏确为 React 树异常卸载（H1 成立）；② ErrorBoundary 防线有效
+  （黑屏 → 可读错误卡片）。
+- 精确定位：`UserManagementModal` 的 `if (!isOpen) return null;` 早返回位于 `resetPwdUser/resetPassword/
+  isApplying`（useState）与 `sqlStatementsMemo`（useMemo）**之前**。组件随 App 常驻挂载，用户右键打开
+  使 `isOpen` false→true 时 hooks 数量不一致 → React 抛 #310。这违反 Hooks 规则（hooks 必须无条件执行，
+  早返回只能置于全部 hooks 之后）。
+- 修复：早返回移到全部 hooks 之后（commit `8b6de2e`）。
+- 回归测试 T9/T10 复现真实用户流（先 `isOpen=false` 挂载再切 `true`，而非直接 `isOpen=true`）：
+  **双向验证** —— 回退修复则 T9/T10 FAIL(#310)，恢复则 PASS，证明测试确实锁住该缺陷。
+- 复盘：先前假设的 backdrop-blur(H3)/footer 裸执行(H1 触发点猜测) 均为**次因或非因**；#310 才是唯一主因。
+  jsdom 单测最初未复现，因为用例都以 `isOpen=true` 直接挂载（hooks 数恒定一致）——这是测试盲点，
+  已由 T9/T10 的「常驻挂载 + 切换」流程补齐。
+
 ## 13. 风险与不做清单
 
 - **不做**：弹窗 UI 改版；权限模型重构；`execute_sql` 参数绑定接口（backlog）；跨路径权限实时同步；其他组件 alert 深度清理（本 WP 仅顺手替换 + 审计记录）。
