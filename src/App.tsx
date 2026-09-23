@@ -17,8 +17,9 @@ import { SafetyConfirmDialog } from './components/SafetyConfirmDialog';
 
 
 import { ConnectionConfig } from './types';
-import { executeSql, executeSqlWithGuard, onTunnelDisconnected, vaultConnectDb, vaultUpsertConnection } from './services/ipc';
+import { executeSql, executeSqlWithGuard, onTunnelDisconnected, vaultConnectDb, vaultUpsertConnection, errToStr } from './services/ipc';
 import { mapTunnelError } from './utils/tunnelError';
+import { showAlert } from './services/appDialog';
 import {
   quoteIdentifier,
   sanitizeIdentifier,
@@ -134,7 +135,7 @@ export const App: React.FC = () => {
       setTunnelDownConns((prev) => prev.filter((id) => id !== conn.id));
       await fetchDatabases(conn);
     } catch (err: any) {
-      const rawMsg = err?.message || String(err);
+      const rawMsg = errToStr(err);
       // WP3: 隧道错误码 → 友好中文文案 (code 形如 TUNNEL_AUTH_FAILED: xxx)
       const tunnelCodeMatch = rawMsg.match(/TUNNEL_[A-Z_]+/);
       const displayMsg = tunnelCodeMatch
@@ -143,7 +144,7 @@ export const App: React.FC = () => {
       useAppStore.setState({
         errorMsg: `Failed to open connection "${conn.name}": ${displayMsg}`
       });
-      alert(`⛔ 数据库连接拒绝 (FATAL Error)：\n无法建立到 "${conn.name}" 的连接。\n原因：${displayMsg}`);
+      showAlert(`数据库连接拒绝 (FATAL Error)：\n无法建立到 "${conn.name}" 的连接。\n原因：${displayMsg}`, { title: '连接失败', danger: true });
       throw err;
     }
   };
@@ -158,7 +159,7 @@ export const App: React.FC = () => {
       setActiveDatabase(newDb);
       await updateConnection(updatedConfig);
     } catch (err: any) {
-      alert(`切换数据库到 [${newDb}] 失败：\n${err.message || String(err)}`);
+      showAlert(`切换数据库到 [${newDb}] 失败：\n${errToStr(err)}`, { title: '切换失败', danger: true });
     }
   };
 
@@ -190,7 +191,7 @@ export const App: React.FC = () => {
     const cleanSql = stripSqlComments(sourceSql);
 
     if (!cleanSql) {
-      alert('💡 提示：当前有效 SQL 内容为空（或全为注释代码），请输入有效 SQL 语句后再执行！');
+      showAlert('当前有效 SQL 内容为空（或全为注释代码），请输入有效 SQL 语句后再执行！');
       return;
     }
     if (!activeConnId) return;
@@ -242,7 +243,7 @@ export const App: React.FC = () => {
             title: `${titleName} (Err)`,
             sql: stmt,
             result: null,
-            error: err.message || String(err)
+            error: errToStr(err)
           });
         }
       }
@@ -663,14 +664,14 @@ export const App: React.FC = () => {
                       }
 
                       if (!targetTable) {
-                        alert('无法从当前查询或选中数据集中自动匹配目标数据表，请确认查询语句包含 FROM 对应数据表。');
+                        showAlert('无法从当前查询或选中数据集中自动匹配目标数据表，请确认查询语句包含 FROM 对应数据表。');
                         return;
                       }
 
                       // 寻找主键列 (默认为 id 列，或第一列)
                       const pkCol = queryResult.columns.find((c) => c.name.toLowerCase() === 'id') || queryResult.columns[0];
                       if (!pkCol) {
-                        alert('未检测到唯一标识列 (如 id)，无法生成精确的回写 SQL。');
+                        showAlert('未检测到唯一标识列 (如 id)，无法生成精确的回写 SQL。');
                         return;
                       }
 
@@ -679,7 +680,7 @@ export const App: React.FC = () => {
                       try {
                         cleanTable = sanitizeIdentifier(targetTable);
                       } catch (e: any) {
-                        alert(`目标表名含非法字符, 无法生成回写 SQL: ${e.message || e}`);
+                        showAlert(`目标表名含非法字符, 无法生成回写 SQL: ${errToStr(e)}`, { title: 'SQL 生成失败', danger: true });
                         return;
                       }
                       const cleanPkCol = sanitizeIdentifier(pkCol.name);
@@ -750,7 +751,7 @@ export const App: React.FC = () => {
                         }
                       });
                       } catch (e: any) {
-                        alert(`变更值含非法字符, 未生成回写 SQL (编辑内容已保留): ${e.message || e}`);
+                        showAlert(`变更值含非法字符, 未生成回写 SQL (编辑内容已保留): ${errToStr(e)}`, { title: 'SQL 生成失败', danger: true });
                         return;
                       }
 
@@ -759,10 +760,10 @@ export const App: React.FC = () => {
                           for (const stmt of sqlStatements) {
                             await runQuery(stmt);
                           }
-                          alert(`成功将 ${sqlStatements.length} 条变更写入数据库！`);
+                          showAlert(`成功将 ${sqlStatements.length} 条变更写入数据库！`, { title: '写入成功' });
                           await runQuery(sqlText);
                         } catch (err: any) {
-                          alert(`数据库执行变更失败: ${err.message || String(err)}`);
+                          showAlert(`数据库执行变更失败: ${errToStr(err)}`, { title: '执行失败', danger: true });
                         }
                       }
                     }}

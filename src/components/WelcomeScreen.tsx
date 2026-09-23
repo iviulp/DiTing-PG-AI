@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ConnectionConfig } from '../types';
 import { Key, Plus, Edit3, Copy, Trash2, ShieldCheck, Sparkles, ChevronRight, Zap, Search, LayoutGrid, List, Download, Upload } from 'lucide-react';
-import { importEncryptedBundle, vaultExportBundle, vaultUpsertConnection } from '../services/ipc';
+import { importEncryptedBundle, vaultExportBundle, vaultUpsertConnection , errToStr } from '../services/ipc';
 import { useAppStore } from '../store/useAppStore';
+import { showAlert, showConfirm } from '../services/appDialog';
 
 interface WelcomeScreenProps {
   connections: ConnectionConfig[];
@@ -86,9 +87,9 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       setExportDialogOpen(false);
       setExportPw('');
       setExportPwConfirm('');
-      alert(`🔐 全量配置已用主密码加密导出成功 (v2 格式)！\n\n文件保存路径：\n${savedPath}\n\n⚠️ 请牢记主密码：丢失后无法找回，备份文件将无法解密。`);
+      showAlert(`全量配置已用主密码加密导出成功 (v2 格式)！\n\n文件保存路径：\n${savedPath}\n\n请牢记主密码：丢失后无法找回，备份文件将无法解密。`, { title: '导出成功' });
     } catch (err: any) {
-      setExportError(err.message || String(err));
+      setExportError(errToStr(err));
     } finally {
       setIsExportingVault(false);
     }
@@ -113,7 +114,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       setImportError(null);
       setImportFailCount(0);
     } catch (err: any) {
-      alert(`⛔ 导入失败：${err.message || String(err)}`);
+      showAlert(`导入失败：${errToStr(err)}`, { title: '导入失败', danger: true });
     } finally {
       e.target.value = '';
     }
@@ -179,13 +180,13 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       const wasLegacy = decrypted.legacy_import === true;
       closeImportDialog();
       if (wasLegacy) {
-        alert(`✅ 旧版 (v1) 备份导入成功，已恢复 ${restored} 个连接。\n\n⚠️ 安全提示：v1 格式使用已废弃的内置固定密钥，任何拿到旧备份文件的人都可解密。\n请立即点击「导出加密配置」设置主密码，以 v2 格式重新备份，并销毁旧文件。`);
+        showAlert(`旧版 (v1) 备份导入成功，已恢复 ${restored} 个连接。\n\n安全提示：v1 格式使用已废弃的内置固定密钥，任何拿到旧备份文件的人都可解密。\n请立即点击「导出加密配置」设置主密码，以 v2 格式重新备份，并销毁旧文件。`, { title: '导入成功 (安全提示)' });
       } else {
-        alert(`✅ 导入成功并已完成自动解密！\n\n已恢复 ${restored} 个数据库连接与 AI 配置。`);
+        showAlert(`导入成功并已完成自动解密！\n\n已恢复 ${restored} 个数据库连接与 AI 配置。`, { title: '导入成功' });
       }
     } catch (err: any) {
       setImportFailCount((n) => n + 1);
-      setImportError(err.message || String(err));
+      setImportError(errToStr(err));
     }
   };
 
@@ -573,9 +574,10 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={(e) => {
+                              onClick={async (e) => {
                                 e.stopPropagation();
-                                if (confirm(`确认要删除谛听连接 "${conn.name}" 吗？`)) {
+                                const ok = await showConfirm(`确认要删除谛听连接 "${conn.name}" 吗？`, { title: '删除连接', danger: true, confirmText: '删除' });
+                                if (ok) {
                                   onDeleteConnection(conn.id);
                                 }
                               }}
@@ -688,9 +690,10 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={(e) => {
+                              onClick={async (e) => {
                                 e.stopPropagation();
-                                if (confirm(`确认要删除谛听连接 "${conn.name}" 吗？`)) {
+                                const ok = await showConfirm(`确认要删除谛听连接 "${conn.name}" 吗？`, { title: '删除连接', danger: true, confirmText: '删除' });
+                                if (ok) {
                                   onDeleteConnection(conn.id);
                                 }
                               }}

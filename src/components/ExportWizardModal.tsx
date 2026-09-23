@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { QueryResult } from '../types';
-import { executeSql, openDownloadsFolder, selectSaveDir, saveFileDirectly } from '../services/ipc';
+import { executeSql, openDownloadsFolder, selectSaveDir, saveFileDirectly , errToStr } from '../services/ipc';
 import { sanitizeIdentifier } from '../utils/sqlEscape';
 import { Download, Activity, Layout, Terminal, CheckCircle2, Layers, FolderOpen, ExternalLink, Sparkles, Database, FileSpreadsheet, Folder } from 'lucide-react';
 
 
 import { HypotrochoidCanvas } from './HypotrochoidCanvas';
+import { showAlert } from '../services/appDialog';
 
 interface ExportWizardModalProps {
   isOpen: boolean;
@@ -128,14 +129,14 @@ export const ExportWizardModal: React.FC<ExportWizardModalProps> = ({
         const fullSql = `SELECT * FROM "${sanitizeIdentifier(tableName || 'user')}";`;
         targetResult = await executeSql(connId, fullSql);
       } catch (err: any) {
-        alert(`查询全表导出失败: ${err.message || String(err)}`);
+        showAlert(`查询全表导出失败: ${errToStr(err)}`, { title: '导出失败', danger: true });
         setIsExporting(false);
         return;
       }
     }
 
     if (!targetResult || targetResult.rows.length === 0) {
-      alert('无可导出的数据行。');
+      showAlert('无可导出的数据行。');
       setIsExporting(false);
       return;
     }
@@ -367,8 +368,9 @@ export const ExportWizardModal: React.FC<ExportWizardModalProps> = ({
                   try {
                     await openDownloadsFolder(exportedFile.saveDir);
                   } catch (err) {
-                    alert(
-                      `📁 [文件已保存成功]\n\n文件名: ${exportedFile.name}\n文件大小: ${exportedFile.size}\n存储路径: ${exportedFile.saveDir}\n\n请在 Finder 或文件资源管理器的相应目录中查看！`
+                    showAlert(
+                      `[文件已保存成功]\n\n文件名: ${exportedFile.name}\n文件大小: ${exportedFile.size}\n存储路径: ${exportedFile.saveDir}\n\n请在 Finder 或文件资源管理器的相应目录中查看！`,
+                      { title: '文件已保存' }
                     );
                   }
                 }}

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import { Play, CheckCircle2 } from 'lucide-react';
+import { showAlert } from '../services/appDialog';
 
 interface SqlEditorProps {
   value: string;
@@ -71,7 +72,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ value, onChange, onExecute
           sqlToRun = model.getValueInRange(selection).trim();
         }
         if (!sqlToRun) {
-          alert('💡 提示：当前未选中任何 SQL 代码，请先用鼠标高亮选中需要单独执行的 SQL 语句！');
+          showAlert('当前未选中任何 SQL 代码，请先用鼠标高亮选中需要单独执行的 SQL 语句！');
           return;
         }
         onExecuteRef.current(sqlToRun);
@@ -100,10 +101,10 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({ value, onChange, onExecute
         const text = model.getValueInRange(selection).trim();
         onExecuteRef.current(text);
       } else {
-        alert('💡 提示：当前未选中任何 SQL 代码，请先用鼠标高亮选中需要单独执行的 SQL 语句！');
+        showAlert('当前未选中任何 SQL 代码，请先用鼠标高亮选中需要单独执行的 SQL 语句！');
       }
     } else {
-      alert('💡 提示：当前未选中任何 SQL 代码，请先用鼠标高亮选中需要单独执行的 SQL 语句！');
+      showAlert('当前未选中任何 SQL 代码，请先用鼠标高亮选中需要单独执行的 SQL 语句！');
     }
     setContextMenu(null);
   };

@@ -27,3 +27,37 @@ if (typeof globalThis.localStorage === 'undefined') {
     writable: true
   });
 }
+
+/// WP8 T8: window.alert/confirm 防回归 spy — Tauri WKWebView 中两者是 no-op,
+/// 全仓已替换为 appDialog/InlineBanner; 任何测试触发原生 alert/confirm 即失败。
+import { afterEach } from 'vitest';
+
+const nativeDialogCalls: string[] = [];
+(globalThis as any).__nativeDialogCalls = nativeDialogCalls;
+
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'alert', {
+    value: (msg?: any) => {
+      nativeDialogCalls.push(`alert: ${String(msg)}`);
+    },
+    writable: true,
+    configurable: true
+  });
+  Object.defineProperty(window, 'confirm', {
+    value: (msg?: any) => {
+      nativeDialogCalls.push(`confirm: ${String(msg)}`);
+      return false;
+    },
+    writable: true,
+    configurable: true
+  });
+}
+
+afterEach(() => {
+  if (nativeDialogCalls.length > 0) {
+    const calls = nativeDialogCalls.splice(0);
+    throw new Error(
+      `WP8 T8: 检测到原生 window.alert/confirm 调用 (Tauri WKWebView 中是 no-op, 必须走 appDialog/InlineBanner):\n${calls.join('\n')}`
+    );
+  }
+});

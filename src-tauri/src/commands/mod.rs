@@ -833,9 +833,12 @@ pub async fn import_encrypted_bundle(
 #[cfg(test)]
 mod tests_import_rate_limit {
     use super::import_rate_limit;
+    // WP8: 两测试共享 FAIL_COUNT 全局态, 并行跑互相干扰 (flaky) — 串行锁保护
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn t14_rate_limit_after_5_fails() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         import_rate_limit::reset();
         assert!(import_rate_limit::check().is_none(), "初始不限速");
         for _ in 0..5 {
@@ -850,6 +853,7 @@ mod tests_import_rate_limit {
 
     #[test]
     fn t14_under_limit_not_blocked() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         import_rate_limit::reset();
         for _ in 0..4 {
             import_rate_limit::bump();

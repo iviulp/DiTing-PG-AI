@@ -4,6 +4,30 @@ import { ConnectionConfig, QueryResult, AiConfig, SafetyBlockedPayload } from '.
 import { escapeSqlLiteral } from '../utils/sqlEscape';
 
 /**
+ * WP8-S3: 统一错误文案提取 — invoke reject 的是 AppErrorDto 普通对象,
+ * 直接 String(err) 会得 [object Object]。按契约 {code, message} 提取可读文案。
+ */
+export function errToStr(err: any): string {
+  if (err == null) return '(未知错误)';
+  if (typeof err === 'string') return err;
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object') {
+    const dto = err as Record<string, any>;
+    const msg = dto.message ?? dto.error ?? dto.msg;
+    if (typeof msg === 'string' && msg.trim()) {
+      return dto.code ? `${msg}（${dto.code}）` : msg;
+    }
+    if (typeof dto.code === 'string' && dto.code) return dto.code;
+    try {
+      const j = JSON.stringify(err);
+      if (j && j !== '{}') return j;
+    } catch { /* fallthrough */ }
+    return '(未知错误: 无 message/code 字段的错误对象)';
+  }
+  return String(err);
+}
+
+/**
  * 建立与注册数据库连接
  */
 export async function connectDb(config: ConnectionConfig): Promise<void> {

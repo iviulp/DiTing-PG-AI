@@ -3,6 +3,8 @@ import { QueryResult, QueryResultTabItem } from '../types';
 import { Table, Zap, ShieldCheck, Save, RotateCcw, Plus, Trash2, CheckCircle2, Eye, ArrowUp, ArrowDown, ArrowUpDown, AlertTriangle } from 'lucide-react';
 import { RowDetailDrawer } from './RowDetailDrawer';
 import { formatDbValue, isDbValueNull } from '../utils/formatDbValue';
+import { errToStr } from '../services/ipc';
+import { showAlert } from '../services/appDialog';
 
 interface DataGridProps {
   result: QueryResult | null;
@@ -226,7 +228,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
       setPendingDeletions(new Set());
       setAddedRows([]);
     } catch (err: any) {
-      alert(`提交变更到数据库失败: ${err.message || String(err)}`);
+      showAlert(`提交变更到数据库失败: ${errToStr(err)}`, { title: '数据库变更失败', danger: true });
     }
   };
 

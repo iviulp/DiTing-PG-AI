@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { executeSql } from '../services/ipc';
+import { executeSql , errToStr } from '../services/ipc';
 import { QueryResult } from '../types';
 import {
   Terminal,
@@ -210,7 +210,7 @@ export const CliConsoleModal: React.FC<CliConsoleModalProps> = ({
         {
           id: `cmd_${Date.now()}`,
           command: cmd,
-          output: `ERROR: ${err.message || String(err)}`,
+          output: `ERROR: ${errToStr(err)}`,
           isError: true,
           timestamp: now,
         },

@@ -22,7 +22,8 @@ vi.mock('../src/services/ipc', () => ({
   vaultConnectDb: vi.fn(async () => {}),
   vaultTestConnection: vi.fn(async () => {}),
   vaultMigrateFromLocalStorage: vi.fn(async () => ({ status: 'migrated', count: 1, dirty_skipped: 0 })),
-  vaultExportBundle: vi.fn(async () => '/tmp/x.ditingvault')
+  vaultExportBundle: vi.fn(async () => '/tmp/x.ditingvault'),
+  errToStr: (e: any) => (e && (e.message || e.error)) || String(e)
 }));
 
 // zustand create 直通

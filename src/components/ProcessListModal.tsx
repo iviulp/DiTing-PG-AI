@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ProcessItem } from '../types';
-import { getProcessList, killProcess } from '../services/ipc';
+import { getProcessList, killProcess , errToStr } from '../services/ipc';
 import { Activity, Skull, RefreshCw, X } from 'lucide-react';
+import { showAlert, showConfirm } from '../services/appDialog';
 
 interface ProcessListModalProps {
   isOpen: boolean;
@@ -38,18 +39,18 @@ export const ProcessListModal: React.FC<ProcessListModalProps> = ({ isOpen, conn
   if (!isOpen) return null;
 
   const handleKill = async (pid: number) => {
-    if (confirm(`Are you sure you want to KILL session PID ${pid}?`)) {
-      try {
-        await killProcess(connId, pid);
-        fetchProcesses();
-      } catch (err: any) {
-        alert(`Kill PID ${pid} failed: ${err.message || String(err)}`);
-      }
+    const ok = await showConfirm(`确定要终止会话 PID ${pid} 吗？\n\n该操作会中断该连接上正在执行的事务。`, { title: '终止数据库会话', danger: true, confirmText: `KILL ${pid}` });
+    if (!ok) return;
+    try {
+      await killProcess(connId, pid);
+      fetchProcesses();
+    } catch (err: any) {
+      showAlert(`Kill PID ${pid} failed: ${errToStr(err)}`, { title: '终止失败', danger: true });
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
       <div className="bg-[#1e2024] border border-slate-700/80 rounded-2xl w-full max-w-4xl h-[550px] text-slate-200 text-xs shadow-2xl flex flex-col overflow-hidden font-sans">
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-[#181a1d]">

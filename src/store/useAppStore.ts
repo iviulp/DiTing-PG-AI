@@ -12,7 +12,7 @@ import {
   vaultDeleteConnection,
   vaultConnectDb,
   vaultMigrateFromLocalStorage
-} from '../services/ipc';
+, errToStr } from '../services/ipc';
 
 /** WP1: 待确认的 Critical SQL (全局确认对话框状态) */
 export interface PendingSafetyConfirm {
@@ -94,7 +94,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     } catch (err: any) {
       // 迁移失败: 保留 localStorage 明文不清除, 显示横幅, 下次启动重试
-      set({ errorMsg: `配置迁移失败 (数据未丢失, 重启将重试): ${err.message || String(err)}` });
+      set({ errorMsg: `配置迁移失败 (数据未丢失, 重启将重试): ${errToStr(err)}` });
       return;
     }
     await get().refreshConnections();
@@ -111,7 +111,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             : null
       }));
     } catch (err: any) {
-      set({ errorMsg: `加载连接列表失败: ${err.message || String(err)}` });
+      set({ errorMsg: `加载连接列表失败: ${errToStr(err)}` });
     }
   },
 
@@ -121,13 +121,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await vaultUpsertConnection(config);
     } catch (err: any) {
-      set({ errorMsg: `保存连接失败: ${err.message || String(err)}` });
+      set({ errorMsg: `保存连接失败: ${errToStr(err)}` });
       return;
     }
     try {
       await vaultConnectDb(config.id);
     } catch (err: any) {
-      warnMsg = `Connection saved with warning: ${err.message || String(err)}`;
+      warnMsg = `Connection saved with warning: ${errToStr(err)}`;
     }
     await get().refreshConnections();
     set((state) => ({
@@ -143,13 +143,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 密码留空 → 后端保留原密码 (占位保留语义)
       await vaultUpsertConnection(config);
     } catch (err: any) {
-      set({ errorMsg: `更新连接失败: ${err.message || String(err)}` });
+      set({ errorMsg: `更新连接失败: ${errToStr(err)}` });
       return;
     }
     try {
       await vaultConnectDb(config.id);
     } catch (err: any) {
-      warnMsg = `Updated with warning: ${err.message || String(err)}`;
+      warnMsg = `Updated with warning: ${errToStr(err)}`;
     }
     await get().refreshConnections();
     set({ errorMsg: warnMsg });
@@ -159,7 +159,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await vaultDeleteConnection(id);
     } catch (err: any) {
-      set({ errorMsg: `删除连接失败: ${err.message || String(err)}` });
+      set({ errorMsg: `删除连接失败: ${errToStr(err)}` });
       return;
     }
     set((state) => ({
@@ -185,7 +185,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
       set({ queryResult: res, isExecuting: false });
     } catch (err: any) {
-      set({ errorMsg: err.message || String(err), isExecuting: false });
+      set({ errorMsg: errToStr(err), isExecuting: false });
     }
   },
 
@@ -211,7 +211,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       await updateAiConfig(outConfig);
       set({ aiConfig: { ...outConfig, key_tail4: outConfig.api_key === '__KEEP__' ? get().aiConfig.key_tail4 : (outConfig.api_key.slice(-4) || null) } });
     } catch (err: any) {
-      set({ errorMsg: err.message || String(err) });
+      set({ errorMsg: errToStr(err) });
     }
   },
 
@@ -251,7 +251,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return await aiChat(prompt, schemaContext, history);
     } catch (err: any) {
-      throw new Error(err.message || String(err));
+      throw new Error(errToStr(err));
     }
   }
 }));

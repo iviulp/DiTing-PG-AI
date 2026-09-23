@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { SchemaItem } from '../types';
-import { getTableSchema } from '../services/ipc';
+import { getTableSchema , errToStr } from '../services/ipc';
 import { Table, Eye, Folder, ChevronRight, ChevronDown, RefreshCw, Layers } from 'lucide-react';
 
 interface SchemaTreeProps {
@@ -43,7 +43,7 @@ export const SchemaTree: React.FC<SchemaTreeProps> = ({
       setItems(data || []);
     } catch (err: any) {
       console.error('Failed to fetch schema:', err);
-      setSchemaError(err?.message || String(err));
+      setSchemaError(errToStr(err));
     } finally {
       setLoading(false);
     }

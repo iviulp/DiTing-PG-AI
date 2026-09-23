@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAppStore } from '../store/useAppStore';
-import { getTableSchema, getTableColumnsMetaData, executeSql } from '../services/ipc';
+import { getTableSchema, getTableColumnsMetaData, executeSql , errToStr } from '../services/ipc';
 import { QueryResult } from '../types';
 import {
   Bot,
@@ -324,7 +324,7 @@ PostgreSQL Data Type & Case Sensitivity Rules:
         )
       );
     } catch (err: any) {
-      const errText = `⚠️ 请求 AI 失败: ${err.message || String(err)}`;
+      const errText = `⚠️ 请求 AI 失败: ${errToStr(err)}`;
       setChatLog((prev) => {
         // 若流式占位消息已插入, 原地替换为错误气泡 (保留已生成部分被覆盖)
         const hasPlaceholder = prev.some((m) => (m as any).id === streamMsgId);
